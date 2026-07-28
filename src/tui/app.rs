@@ -106,6 +106,7 @@ pub struct App {
     pub overview: bool,
     /// Which vendors the Overview lists (`[ui] overview_vendors`); `None` = all.
     pub overview_vendors: Option<Vec<VendorId>>,
+    pub show_pacing_in_overview: bool,
     pub theme: Theme,
     pub quit: bool,
     /// When `Some`, the Settings overlay is open and consuming key events.
@@ -144,6 +145,7 @@ impl App {
             tab_generation: 0,
             overview: false,
             overview_vendors: None,
+            show_pacing_in_overview: false,
             theme,
             quit: false,
             settings: None,

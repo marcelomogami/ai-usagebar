@@ -302,14 +302,19 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
+    let show_pacing = app.show_pacing_in_overview;
+    let now = chrono::Utc::now();
     // Left-align the metric columns by padding the vendor-name column to the
     // widest name (bounded so one long account label can't blow out the layout).
-    let name_w = idxs
-        .iter()
-        .map(|&i| tab_label(&app.tabs_meta[i]).chars().count())
-        .max()
-        .unwrap_or(6)
-        .clamp(6, 22);
+    let name_w = if show_pacing {
+        12
+    } else {
+        idxs.iter()
+            .map(|&i| tab_label(&app.tabs_meta[i]).chars().count())
+            .max()
+            .unwrap_or(6)
+            .clamp(6, 22)
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     for &i in &idxs {
@@ -339,16 +344,30 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
                     ));
                     spans.push(theme.span("  "));
                 }
-                let (plan, cells) = panels::compact_cells(&r.snapshot);
-                if !plan.is_empty() {
-                    spans.push(theme.muted(format!("{plan}  ")));
-                }
-                for (j, (text, sev)) in cells.iter().enumerate() {
-                    if j > 0 {
-                        spans.push(theme.span("  "));
+                let (plan, cells) = panels::compact_cells(&r.snapshot, now, show_pacing, 5);
+                if show_pacing {
+                    let plan_pad = 14usize.saturating_sub(plan.chars().count());
+                    spans.push(theme.muted(format!("{plan}{}", " ".repeat(plan_pad))));
+                    for (j, (text, sev)) in cells.iter().enumerate() {
+                        if j > 0 {
+                            spans.push(theme.muted("  |  "));
+                        } else {
+                            spans.push(theme.span("  "));
+                        }
+                        let color = severity_color(&app.theme, &theme, *sev);
+                        spans.push(Span::styled(text.clone(), Style::default().fg(color)));
                     }
-                    let color = severity_color(&app.theme, &theme, *sev);
-                    spans.push(Span::styled(text.clone(), Style::default().fg(color)));
+                } else {
+                    if !plan.is_empty() {
+                        spans.push(theme.muted(format!("{plan}  ")));
+                    }
+                    for (j, (text, sev)) in cells.iter().enumerate() {
+                        if j > 0 {
+                            spans.push(theme.span("  "));
+                        }
+                        let color = severity_color(&app.theme, &theme, *sev);
+                        spans.push(Span::styled(text.clone(), Style::default().fg(color)));
+                    }
                 }
                 if r.stale {
                     spans.push(theme.muted("  ⏸"));

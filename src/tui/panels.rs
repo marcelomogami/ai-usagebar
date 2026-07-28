@@ -56,7 +56,12 @@ pub enum Section {
 /// or a balance — each carrying a severity for coloring. Same numbers as
 /// [`sections_for`], flattened for a dense multi-vendor list. The vendor's name
 /// is supplied by the caller, so it is not repeated here.
-pub fn compact_cells(snapshot: &VendorSnapshot) -> (String, Vec<(String, PaceSeverity)>) {
+pub fn compact_cells(
+    snapshot: &VendorSnapshot,
+    now: DateTime<Utc>,
+    show_pacing: bool,
+    pace_tolerance: u32,
+) -> (String, Vec<(String, PaceSeverity)>) {
     let pct = |label: &str, p: i32| (format!("{label} {p}%"), severity_for(p));
     let money = |v: f64| (format!("${v:.2}"), PaceSeverity::Low);
     let ccy = |v: f64, c: &str| {
@@ -67,14 +72,48 @@ pub fn compact_cells(snapshot: &VendorSnapshot) -> (String, Vec<(String, PaceSev
         };
         (s, PaceSeverity::Low)
     };
+    let format_win = |label: &str, window: Option<&crate::usage::UsageWindow>, is_weekly: bool| {
+        let Some(w) = window else {
+            let label_str = if label == "S" { "5h" } else if label == "W" { "7d" } else { label };
+            return (format!("{label_str:<2} —"), PaceSeverity::Low);
+        };
+        let p_val = w.utilization_pct.clamp(0, 100);
+        let sev = severity_for(p_val);
+        if !show_pacing {
+            let label_str = if label == "S" { "5h" } else if label == "W" { "7d" } else { label };
+            return (format!("{label_str} {p_val}%"), sev);
+        }
+        let p = pacing::calc(p_val, w.resets_at, now, w.window_duration, pace_tolerance);
+        let glyph = p.ratio_pace.glyph();
+        let elapsed = p.elapsed_pct;
+
+        let reset_str = match w.resets_at {
+            Some(at) => {
+                let local = at.with_timezone(&chrono::Local);
+                if is_weekly {
+                    local.format("R: %d/%m %H:%M").to_string()
+                } else {
+                    local.format("R: %H:%M").to_string()
+                }
+            }
+            None => "R: —".to_string(),
+        };
+
+        let label_str = if label == "S" { "5h" } else if label == "W" { "7d" } else { label };
+        (
+            format!("{label_str:<2} {p_val:>2}% ({glyph}{elapsed:>2}%) {reset_str}"),
+            sev,
+        )
+    };
+
     let (plan, mut cells) = match snapshot {
         VendorSnapshot::Anthropic(s) => {
             let mut cells = vec![
-                pct("S", s.session.utilization_pct),
-                pct("W", s.weekly.utilization_pct),
+                format_win("5h", Some(&s.session), false),
+                format_win("7d", Some(&s.weekly), true),
             ];
             if let Some(sonnet) = &s.sonnet {
-                cells.push(pct("Son", sonnet.utilization_pct));
+                cells.push(format_win("Son", Some(sonnet), false));
             }
             (s.plan.clone(), cells)
         }
@@ -88,10 +127,12 @@ pub fn compact_cells(snapshot: &VendorSnapshot) -> (String, Vec<(String, PaceSev
         VendorSnapshot::Openai(s) => {
             let mut cells = Vec::new();
             if let Some(w) = &s.session {
-                cells.push(pct("5h", w.utilization_pct));
+                cells.push(format_win("5h", Some(w), false));
             }
             if let Some(w) = &s.weekly {
-                cells.push(pct("7d", w.utilization_pct));
+                cells.push(format_win("7d", Some(w), true));
+            } else if show_pacing {
+                cells.push(format_win("7d", None, true));
             }
             if cells.is_empty() {
                 cells.push(("—".into(), PaceSeverity::Low));
@@ -101,10 +142,12 @@ pub fn compact_cells(snapshot: &VendorSnapshot) -> (String, Vec<(String, PaceSev
         VendorSnapshot::Zai(s) => {
             let mut cells = Vec::new();
             if let Some(w) = &s.session {
-                cells.push(pct("S", w.utilization_pct));
+                cells.push(format_win("5h", Some(w), false));
             }
             if let Some(w) = &s.weekly {
-                cells.push(pct("W", w.utilization_pct));
+                cells.push(format_win("7d", Some(w), true));
+            } else if show_pacing {
+                cells.push(format_win("7d", None, true));
             }
             if cells.is_empty() {
                 cells.push(("—".into(), PaceSeverity::Low));
@@ -124,8 +167,8 @@ pub fn compact_cells(snapshot: &VendorSnapshot) -> (String, Vec<(String, PaceSev
         VendorSnapshot::Antigravity(s) => (
             s.plan.clone(),
             vec![
-                pct("S", s.session.utilization_pct),
-                pct("W", s.weekly.utilization_pct),
+                format_win("5h", Some(&s.session), false),
+                format_win("7d", Some(&s.weekly), true),
             ],
         ),
         VendorSnapshot::Cursor(s) => (
@@ -1400,17 +1443,22 @@ mod tests {
     #[test]
     fn compact_cells_flatten_key_metrics_for_the_overview() {
         // Percent vendor (Cursor): plan + two colored pool cells.
-        let (plan, cells) = compact_cells(&VendorSnapshot::Cursor(cursor_snap()));
+        let (plan, cells) = compact_cells(&VendorSnapshot::Cursor(cursor_snap()), now(), false, 5);
         assert_eq!(plan, "Ultra");
         assert_eq!(cells[0].0, "auto 98%");
         assert_eq!(cells[1].0, "premium 100%");
         assert_eq!(cells[1].1, PaceSeverity::Critical); // 100% is critical
 
         // Balance vendor (Kilo): no plan, a single money cell, calm severity.
-        let (plan, cells) = compact_cells(&VendorSnapshot::Kilo(crate::usage::KiloSnapshot {
-            label: "Kilo".into(),
-            balance: 8.42,
-        }));
+        let (plan, cells) = compact_cells(
+            &VendorSnapshot::Kilo(crate::usage::KiloSnapshot {
+                label: "Kilo".into(),
+                balance: 8.42,
+            }),
+            now(),
+            false,
+            5,
+        );
         assert!(plan.is_empty());
         assert_eq!(cells, vec![("$8.42".to_string(), PaceSeverity::Low)]);
     }
@@ -1428,9 +1476,36 @@ mod tests {
 
         let mut snapshot = cursor_snap();
         snapshot.plan = "Ultra\x1b[2J\x07".into();
-        let (plan, _) = compact_cells(&VendorSnapshot::Cursor(snapshot));
+        let (plan, _) = compact_cells(&VendorSnapshot::Cursor(snapshot), now(), false, 5);
         assert_eq!(plan, "Ultra[2J");
         assert!(!plan.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn compact_cells_with_pacing_overview_formats_grid_columns() {
+        let reset_5h = now() + chrono::Duration::hours(2);
+        let reset_7d = now() + chrono::Duration::days(5);
+        let snap = crate::usage::AnthropicSnapshot {
+            plan: "Pro".into(),
+            session: crate::usage::UsageWindow {
+                utilization_pct: 36,
+                resets_at: Some(reset_5h),
+                window_duration: chrono::Duration::hours(5),
+            },
+            weekly: crate::usage::UsageWindow {
+                utilization_pct: 60,
+                resets_at: Some(reset_7d),
+                window_duration: chrono::Duration::days(7),
+            },
+            sonnet: None,
+            scoped: Vec::new(),
+            extra: None,
+        };
+        let (plan, cells) = compact_cells(&VendorSnapshot::Anthropic(snap), now(), true, 5);
+        assert_eq!(plan, "Pro");
+        assert_eq!(cells.len(), 2);
+        assert!(cells[0].0.starts_with("5h 36%"));
+        assert!(cells[1].0.starts_with("7d 60%"));
     }
 
     #[test]

@@ -19,6 +19,10 @@
 # Default sidebar (falls back to navbar on narrow terminals).
 # vendor_box = "sidebar"
 
+# Exibe a indicação de pacing numérico e horários de reset em colunas alinhadas no Overview da TUI.
+# Default false (desativado).
+# show_pacing_in_overview = true
+
 # Optional, TUI-only monitor for local Claude Code session context. When
 # enabled, press `c` in ai-usagebar-tui. The scanner reads only bounded tails
 # below ~/.claude/projects, skips subagent transcripts and never follows

@@ -65,6 +65,8 @@ pub struct UiConfig {
     pub overview_vendors: Option<Vec<VendorId>>,
     /// Layout style for vendor navigation in the TUI: sidebar | navbar | none.
     pub vendor_box: Option<VendorBoxStyle>,
+    /// Show numeric pacing indicators and reset times in grid-aligned columns in the Overview.
+    pub show_pacing_in_overview: Option<bool>,
 }
 
 impl UiConfig {

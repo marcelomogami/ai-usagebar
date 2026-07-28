@@ -70,6 +70,7 @@ async fn run() -> io::Result<()> {
     app.context_enabled = config.context.enabled;
     app.overview_vendors = config.ui.overview_vendors.clone();
     app.vendor_box = config.ui.vendor_box();
+    app.show_pacing_in_overview = config.ui.show_pacing_in_overview.unwrap_or(false);
 
     // RAII: restoring the terminal must survive an error or a panic in the
     // loop below. Doing it inline left the user in raw mode on the alternate
