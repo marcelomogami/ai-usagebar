@@ -74,14 +74,12 @@ pub fn compact_cells(
     };
     let format_win = |label: &str, window: Option<&crate::usage::UsageWindow>, is_weekly: bool| {
         let Some(w) = window else {
-            let label_str = if label == "S" { "5h" } else if label == "W" { "7d" } else { label };
-            return (format!("{label_str:<2} —"), PaceSeverity::Low);
+            return (format!("{label:<1} —"), PaceSeverity::Low);
         };
         let p_val = w.utilization_pct.clamp(0, 100);
         let sev = severity_for(p_val);
         if !show_pacing {
-            let label_str = if label == "S" { "5h" } else if label == "W" { "7d" } else { label };
-            return (format!("{label_str} {p_val}%"), sev);
+            return (format!("{label} {p_val}%"), sev);
         }
         let p = pacing::calc(p_val, w.resets_at, now, w.window_duration, pace_tolerance);
         let glyph = p.ratio_pace.glyph();
@@ -91,17 +89,16 @@ pub fn compact_cells(
             Some(at) => {
                 let local = at.with_timezone(&chrono::Local);
                 if is_weekly {
-                    local.format("R: %d/%m %H:%M").to_string()
+                    local.format("%d/%m %H:%M").to_string()
                 } else {
-                    local.format("R: %H:%M").to_string()
+                    local.format("%H:%M").to_string()
                 }
             }
-            None => "R: —".to_string(),
+            None => "—".to_string(),
         };
 
-        let label_str = if label == "S" { "5h" } else if label == "W" { "7d" } else { label };
         (
-            format!("{label_str:<2} {p_val:>2}% ({glyph}{elapsed:>2}%) {reset_str}"),
+            format!("{label:<1} {p_val:>2}% ({glyph}{elapsed:>2}%) {reset_str}"),
             sev,
         )
     };
@@ -109,8 +106,8 @@ pub fn compact_cells(
     let (plan, mut cells) = match snapshot {
         VendorSnapshot::Anthropic(s) => {
             let mut cells = vec![
-                format_win("5h", Some(&s.session), false),
-                format_win("7d", Some(&s.weekly), true),
+                format_win("S", Some(&s.session), false),
+                format_win("W", Some(&s.weekly), true),
             ];
             if let Some(sonnet) = &s.sonnet {
                 cells.push(format_win("Son", Some(sonnet), false));
@@ -127,12 +124,12 @@ pub fn compact_cells(
         VendorSnapshot::Openai(s) => {
             let mut cells = Vec::new();
             if let Some(w) = &s.session {
-                cells.push(format_win("5h", Some(w), false));
+                cells.push(format_win("S", Some(w), false));
             }
             if let Some(w) = &s.weekly {
-                cells.push(format_win("7d", Some(w), true));
+                cells.push(format_win("W", Some(w), true));
             } else if show_pacing {
-                cells.push(format_win("7d", None, true));
+                cells.push(format_win("W", None, true));
             }
             if cells.is_empty() {
                 cells.push(("—".into(), PaceSeverity::Low));
@@ -142,12 +139,12 @@ pub fn compact_cells(
         VendorSnapshot::Zai(s) => {
             let mut cells = Vec::new();
             if let Some(w) = &s.session {
-                cells.push(format_win("5h", Some(w), false));
+                cells.push(format_win("S", Some(w), false));
             }
             if let Some(w) = &s.weekly {
-                cells.push(format_win("7d", Some(w), true));
+                cells.push(format_win("W", Some(w), true));
             } else if show_pacing {
-                cells.push(format_win("7d", None, true));
+                cells.push(format_win("W", None, true));
             }
             if cells.is_empty() {
                 cells.push(("—".into(), PaceSeverity::Low));
@@ -167,8 +164,8 @@ pub fn compact_cells(
         VendorSnapshot::Antigravity(s) => (
             s.plan.clone(),
             vec![
-                format_win("5h", Some(&s.session), false),
-                format_win("7d", Some(&s.weekly), true),
+                format_win("S", Some(&s.session), false),
+                format_win("W", Some(&s.weekly), true),
             ],
         ),
         VendorSnapshot::Cursor(s) => (
@@ -1504,8 +1501,8 @@ mod tests {
         let (plan, cells) = compact_cells(&VendorSnapshot::Anthropic(snap), now(), true, 5);
         assert_eq!(plan, "Pro");
         assert_eq!(cells.len(), 2);
-        assert!(cells[0].0.starts_with("5h 36%"));
-        assert!(cells[1].0.starts_with("7d 60%"));
+        assert!(cells[0].0.starts_with("S 36%"));
+        assert!(cells[1].0.starts_with("W 60%"));
     }
 
     #[test]
