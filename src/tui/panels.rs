@@ -51,6 +51,17 @@ pub enum Section {
     Spacer,
 }
 
+/// One compact Overview metric. Usage-backed cells keep their percentage
+/// separate from the surrounding text so the view can render a small,
+/// explicitly-associated bar for that individual window.
+pub struct CompactCell {
+    pub label: Option<String>,
+    pub value: String,
+    pub detail: Option<String>,
+    pub severity: PaceSeverity,
+    pub utilization_pct: Option<i32>,
+}
+
 /// Compact one-line projection of a vendor snapshot for the Overview: a short
 /// plan/tier sub-label (may be empty) plus a few key metric cells — a percent
 /// or a balance — each carrying a severity for coloring. Same numbers as
@@ -61,25 +72,55 @@ pub fn compact_cells(
     now: DateTime<Utc>,
     show_pacing: bool,
     pace_tolerance: u32,
-) -> (String, Vec<(String, PaceSeverity)>) {
-    let pct = |label: &str, p: i32| (format!("{label} {p}%"), severity_for(p));
-    let money = |v: f64| (format!("${v:.2}"), PaceSeverity::Low);
+) -> (String, Vec<CompactCell>) {
+    let pct = |label: &str, p: i32| CompactCell {
+        label: Some(label.into()),
+        value: format!("{p}%"),
+        detail: None,
+        severity: severity_for(p),
+        utilization_pct: Some(p.clamp(0, 100)),
+    };
+    let money = |v: f64| CompactCell {
+        label: None,
+        value: format!("${v:.2}"),
+        detail: None,
+        severity: PaceSeverity::Low,
+        utilization_pct: None,
+    };
     let ccy = |v: f64, c: &str| {
         let s = match c {
             "USD" => format!("${v:.2}"),
             "CNY" => format!("¥{v:.2}"),
             _ => format!("{v:.2} {c}"),
         };
-        (s, PaceSeverity::Low)
+        CompactCell {
+            label: None,
+            value: s,
+            detail: None,
+            severity: PaceSeverity::Low,
+            utilization_pct: None,
+        }
     };
     let format_win = |label: &str, window: Option<&crate::usage::UsageWindow>, is_weekly: bool| {
         let Some(w) = window else {
-            return (format!("{label:<1} —"), PaceSeverity::Low);
+            return CompactCell {
+                label: Some(label.into()),
+                value: "—".into(),
+                detail: None,
+                severity: PaceSeverity::Low,
+                utilization_pct: None,
+            };
         };
         let p_val = w.utilization_pct.clamp(0, 100);
         let sev = severity_for(p_val);
         if !show_pacing {
-            return (format!("{label} {p_val}%"), sev);
+            return CompactCell {
+                label: Some(label.into()),
+                value: format!("{p_val}%"),
+                detail: None,
+                severity: sev,
+                utilization_pct: Some(p_val),
+            };
         }
         let p = pacing::calc(p_val, w.resets_at, now, w.window_duration, pace_tolerance);
         let glyph = p.ratio_pace.glyph();
@@ -97,10 +138,13 @@ pub fn compact_cells(
             None => "—".to_string(),
         };
 
-        (
-            format!("{label:<1} {p_val:>2}% ({glyph}{elapsed:>2}%) {reset_str}"),
-            sev,
-        )
+        CompactCell {
+            label: Some(label.into()),
+            value: format!("{p_val:>2}%"),
+            detail: Some(format!(" ({glyph}{elapsed:>2}%) {reset_str}")),
+            severity: sev,
+            utilization_pct: Some(p_val),
+        }
     };
 
     let (plan, mut cells) = match snapshot {
@@ -117,7 +161,13 @@ pub fn compact_cells(
         VendorSnapshot::AnthropicApi(s) => {
             let cell = match s.pct() {
                 Some(p) => pct("spend", p),
-                None => (format!("${:.2}/mo", s.spent), PaceSeverity::Low),
+                None => CompactCell {
+                    label: None,
+                    value: format!("${:.2}/mo", s.spent),
+                    detail: None,
+                    severity: PaceSeverity::Low,
+                    utilization_pct: None,
+                },
             };
             (String::new(), vec![cell])
         }
@@ -132,7 +182,13 @@ pub fn compact_cells(
                 cells.push(format_win("W", None, true));
             }
             if cells.is_empty() {
-                cells.push(("—".into(), PaceSeverity::Low));
+                cells.push(CompactCell {
+                    label: None,
+                    value: "—".into(),
+                    detail: None,
+                    severity: PaceSeverity::Low,
+                    utilization_pct: None,
+                });
             }
             (s.plan.clone(), cells)
         }
@@ -147,7 +203,13 @@ pub fn compact_cells(
                 cells.push(format_win("W", None, true));
             }
             if cells.is_empty() {
-                cells.push(("—".into(), PaceSeverity::Low));
+                cells.push(CompactCell {
+                    label: None,
+                    value: "—".into(),
+                    detail: None,
+                    severity: PaceSeverity::Low,
+                    utilization_pct: None,
+                });
             }
             (s.plan.clone(), cells)
         }
@@ -180,8 +242,16 @@ pub fn compact_cells(
             ],
         ),
     };
-    for (text, _) in &mut cells {
-        *text = crate::display::sanitize_untrusted_field(text);
+    for cell in &mut cells {
+        cell.label = cell
+            .label
+            .as_deref()
+            .map(crate::display::sanitize_untrusted_field);
+        cell.value = crate::display::sanitize_untrusted_field(&cell.value);
+        cell.detail = cell
+            .detail
+            .as_deref()
+            .map(crate::display::sanitize_untrusted_field);
     }
     (crate::display::sanitize_untrusted_field(&plan), cells)
 }
@@ -1442,9 +1512,11 @@ mod tests {
         // Percent vendor (Cursor): plan + two colored pool cells.
         let (plan, cells) = compact_cells(&VendorSnapshot::Cursor(cursor_snap()), now(), false, 5);
         assert_eq!(plan, "Ultra");
-        assert_eq!(cells[0].0, "auto 98%");
-        assert_eq!(cells[1].0, "premium 100%");
-        assert_eq!(cells[1].1, PaceSeverity::Critical); // 100% is critical
+        assert_eq!(cells[0].label.as_deref(), Some("auto"));
+        assert_eq!(cells[0].value, "98%");
+        assert_eq!(cells[1].label.as_deref(), Some("premium"));
+        assert_eq!(cells[1].value, "100%");
+        assert_eq!(cells[1].severity, PaceSeverity::Critical); // 100% is critical
 
         // Balance vendor (Kilo): no plan, a single money cell, calm severity.
         let (plan, cells) = compact_cells(
@@ -1457,7 +1529,9 @@ mod tests {
             5,
         );
         assert!(plan.is_empty());
-        assert_eq!(cells, vec![("$8.42".to_string(), PaceSeverity::Low)]);
+        assert_eq!(cells[0].label, None);
+        assert_eq!(cells[0].value, "$8.42");
+        assert_eq!(cells[0].severity, PaceSeverity::Low);
     }
 
     #[test]
@@ -1501,8 +1575,10 @@ mod tests {
         let (plan, cells) = compact_cells(&VendorSnapshot::Anthropic(snap), now(), true, 5);
         assert_eq!(plan, "Pro");
         assert_eq!(cells.len(), 2);
-        assert!(cells[0].0.starts_with("S 36%"));
-        assert!(cells[1].0.starts_with("W 60%"));
+        assert_eq!(cells[0].label.as_deref(), Some("S"));
+        assert_eq!(cells[0].value, "36%");
+        assert_eq!(cells[1].label.as_deref(), Some("W"));
+        assert_eq!(cells[1].value, "60%");
     }
 
     #[test]

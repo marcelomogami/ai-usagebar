@@ -6,8 +6,10 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui_bubbletea_components::{Help, KeyBinding, ListItem, SelectList};
+use ratatui_bubbletea_theme::BubbleTheme;
 
 use crate::format::local_time_hms;
+use crate::theme::Theme;
 use crate::tui::app::App;
 use crate::tui::app::TabId;
 use crate::tui::app::TabState;
@@ -289,8 +291,54 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 
 /// Render the Overview: one compact row per configured vendor — its name, a
 /// plan/tier sub-label, and its key metric cells colored by severity.
-/// Width of the per-row mini bar in the Overview (cells).
-const OVERVIEW_BAR_W: usize = 12;
+/// Width of the mini bar shown beside each usage window in the Overview.
+const OVERVIEW_BAR_W: usize = 5;
+
+fn render_overview_bar(
+    spans: &mut Vec<Span<'static>>,
+    theme: &BubbleTheme,
+    app_theme: &Theme,
+    pct: i32,
+    severity: crate::pacing::PaceSeverity,
+) {
+    let filled = ((pct.clamp(0, 100) as usize * OVERVIEW_BAR_W) + 50) / 100;
+    let bar_color = severity_color(app_theme, theme, severity);
+    let empty = color(&app_theme.bar_empty).unwrap_or(theme.palette.selected_background);
+    spans.push(Span::styled(
+        "█".repeat(filled),
+        Style::default().fg(bar_color),
+    ));
+    spans.push(Span::styled(
+        "░".repeat(OVERVIEW_BAR_W - filled),
+        Style::default().fg(empty),
+    ));
+}
+
+fn render_overview_cell(
+    spans: &mut Vec<Span<'static>>,
+    cell: &panels::CompactCell,
+    theme: &BubbleTheme,
+    app_theme: &Theme,
+) {
+    let color = severity_color(app_theme, theme, cell.severity);
+    if let Some(label) = &cell.label {
+        spans.push(Span::styled(
+            format!("{label} "),
+            Style::default().fg(color),
+        ));
+    }
+    if let Some(pct) = cell.utilization_pct {
+        if cell.label.is_none() {
+            spans.push(theme.span(" "));
+        }
+        render_overview_bar(spans, theme, app_theme, pct, cell.severity);
+        spans.push(theme.span(" "));
+    }
+    spans.push(Span::styled(cell.value.clone(), Style::default().fg(color)));
+    if let Some(detail) = &cell.detail {
+        spans.push(Span::styled(detail.clone(), Style::default().fg(color)));
+    }
+}
 
 fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
     let theme = bubble_theme(&app.theme);
@@ -326,47 +374,27 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
         ];
         match app.tabs.get(i) {
             Some(TabState::Ready(r)) => {
-                // Mini bar for the vendor's headline metric, mirroring the
-                // menu-bar overview; balance-only vendors have none.
-                if let Some(p) = panels::headline_pct(&r.snapshot) {
-                    let filled = (p.clamp(0, 100) as usize * OVERVIEW_BAR_W).div_ceil(100);
-                    let sev_color =
-                        severity_color(&app.theme, &theme, crate::pango::severity_for(p));
-                    spans.push(Span::styled(
-                        "█".repeat(filled),
-                        Style::default().fg(sev_color),
-                    ));
-                    let empty =
-                        color(&app.theme.bar_empty).unwrap_or(theme.palette.selected_background);
-                    spans.push(Span::styled(
-                        "░".repeat(OVERVIEW_BAR_W - filled),
-                        Style::default().fg(empty),
-                    ));
-                    spans.push(theme.span("  "));
-                }
                 let (plan, cells) = panels::compact_cells(&r.snapshot, now, show_pacing, 5);
                 if show_pacing {
                     let plan_pad = 14usize.saturating_sub(plan.chars().count());
                     spans.push(theme.muted(format!("{plan}{}", " ".repeat(plan_pad))));
-                    for (j, (text, sev)) in cells.iter().enumerate() {
+                    for (j, cell) in cells.iter().enumerate() {
                         if j > 0 {
                             spans.push(theme.muted("  |  "));
                         } else {
                             spans.push(theme.span("  "));
                         }
-                        let color = severity_color(&app.theme, &theme, *sev);
-                        spans.push(Span::styled(text.clone(), Style::default().fg(color)));
+                        render_overview_cell(&mut spans, cell, &theme, &app.theme);
                     }
                 } else {
                     if !plan.is_empty() {
                         spans.push(theme.muted(format!("{plan}  ")));
                     }
-                    for (j, (text, sev)) in cells.iter().enumerate() {
+                    for (j, cell) in cells.iter().enumerate() {
                         if j > 0 {
                             spans.push(theme.span("  "));
                         }
-                        let color = severity_color(&app.theme, &theme, *sev);
-                        spans.push(Span::styled(text.clone(), Style::default().fg(color)));
+                        render_overview_cell(&mut spans, cell, &theme, &app.theme);
                     }
                 }
                 if r.stale {
@@ -435,7 +463,7 @@ mod tests {
     use super::*;
     use crate::theme::Theme;
     use crate::tui::app::ReadyTab;
-    use crate::usage::{OpenRouterSnapshot, VendorSnapshot};
+    use crate::usage::{AnthropicSnapshot, OpenRouterSnapshot, UsageWindow, VendorSnapshot};
     use chrono::{DateTime, TimeZone, Utc};
 
     fn ready_at(fetched_at: Option<DateTime<Utc>>) -> TabState {
@@ -572,6 +600,40 @@ mod tests {
             assert!(out.contains("Claude context"), "{layout:?}: {out}");
             assert!(out.contains("vendors"), "{layout:?}: {out}");
         }
+    }
+
+    #[test]
+    fn overview_renders_a_five_cell_bar_for_each_usage_window() {
+        let mut app = app_with(vec![
+            TabState::Ready(Box::new(ReadyTab {
+                snapshot: VendorSnapshot::Anthropic(AnthropicSnapshot {
+                    plan: "Pro".into(),
+                    session: UsageWindow {
+                        utilization_pct: 38,
+                        resets_at: None,
+                        window_duration: chrono::Duration::hours(5),
+                    },
+                    weekly: UsageWindow {
+                        utilization_pct: 70,
+                        resets_at: None,
+                        window_duration: chrono::Duration::days(7),
+                    },
+                    sonnet: None,
+                    scoped: Vec::new(),
+                    extra: None,
+                }),
+                stale: false,
+                last_error: None,
+                fetched_at: None,
+            })),
+            ready_at(None),
+        ]);
+        app.overview = true;
+        app.show_pacing_in_overview = true;
+
+        let out = body_text(&app);
+        assert!(out.contains("S ██░░░ 38%"), "{out}");
+        assert!(out.contains("W ████░ 70%"), "{out}");
     }
 
     #[test]
