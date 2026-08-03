@@ -1683,12 +1683,15 @@ mod tests {
 
     #[test]
     fn kiro_compact_cell_shows_the_credit_percentage() {
-        let (plan, cells) = compact_cells(&VendorSnapshot::Kiro(kiro_snap()));
+        let (plan, cells) = compact_cells(&VendorSnapshot::Kiro(kiro_snap()), now(), false, 5);
         assert_eq!(plan, "KIRO POWER");
-        assert_eq!(
-            cells,
-            vec![("credits 99%".to_string(), PaceSeverity::Critical)]
-        );
+        assert_eq!(cells.len(), 1);
+        let cell = &cells[0];
+        assert_eq!(cell.label.as_deref(), Some("credits"));
+        assert_eq!(cell.value, "99%");
+        assert_eq!(cell.detail, None);
+        assert_eq!(cell.severity, PaceSeverity::Critical);
+        assert_eq!(cell.utilization_pct, Some(99));
     }
 
     #[test]
