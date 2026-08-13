@@ -9,8 +9,25 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-08-11
+
 ### Added
 
+- **SuperGrok subscription vendor** (`--vendor supergrok`, `[supergrok]`,
+  opt-in). Shows the current weekly or monthly included-credit usage, reset,
+  tier, and prepaid balance from the official Grok Build CLI's `x.ai/billing`
+  ACP extension. ai-usagebar never parses, copies, caches, refreshes, or places
+  Grok credentials in ACP messages:
+  Grok Build retains account-scope, custom OIDC/external-provider, proxy,
+  rotation, and `auth.json.lock` ownership. Cache isolation uses only an opaque
+  digest of Grok's auth/config state, never a raw token or account identifier.
+  Distinct from the existing `grok` vendor, which reads prepaid Management API
+  balance with `XAI_MANAGEMENT_KEY`. `{sgk_*}` placeholders include the actual
+  period kind; legacy generic weekly aliases remain available for format
+  compatibility.
+- `--version` / `-V` on the `ai-usagebar` binary, reporting the crate version
+  (#81). Until now the only way to tell which build was installed was parsing
+  `cargo install --list`.
 - **Kiro CLI vendor** (`--vendor kiro`, `[kiro]`, opt-in). Reads the credit
   pool from `AmazonCodeWhispererService.GetUsageLimits` — the exact call
   kiro-cli's own `/usage` slash command makes — using the AWS SSO OIDC
@@ -28,6 +45,37 @@ Each release is also published at
   `~/.config/cursor/auth.json`. The IDE database stays the preferred source
   when both exist; an existing but unreadable or malformed IDE database still
   surfaces its own error instead of silently switching to another login.
+
+### Fixed
+
+- **A routine renamed in one account now converges to one title everywhere.** A
+  scheduled task has no `updatedAt`, so a rename leaves `createdAt` untouched and
+  previously only reached the account you switched *to*. A switch now carries
+  the title selected by the baseline-aware routine merge into *every* account's
+  registry, so the name stops disagreeing across accounts. The convergence pass
+  changes only `displayName` and preserves the rest of each registry, including
+  unknown top-level fields. There is no prompt, and it applies to the terminal
+  and menu bar alike since both drive the same switch path. Mirrored in
+  claude-acc.
+
+- **Antigravity now works on macOS, in both the CLI and the menu-bar app.**
+  Local-server discovery (`discover_ls_ports`) only ever walked `/proc`, so on
+  macOS — which has no `/proc` — it silently returned nothing and every
+  Antigravity fetch failed with "no local server found" even while Antigravity
+  was running. It now shells out to `lsof -iTCP -sTCP:LISTEN -F pcn`, the
+  macOS equivalent, and matches listening processes with the same predicate
+  the Linux path already used (now case-insensitive, since the packaged macOS
+  app's process name is capitalized). Separately, the menu-bar app's own
+  vendor list (`VENDOR_AUTH` in `macos/ai-usagebar-menubar.swift`) had never
+  been updated when Antigravity shipped, so it stayed invisible there even
+  after enabling `[antigravity]` — it's now a `local`-kind entry alongside
+  Cursor, "configured" the same way the GNOME extension already detects it
+  (any of `~/.gemini/{antigravity,antigravity-cli,antigravity-ide}`).
+
+### Security
+
+- Updated the transitive `lru` dependency from 0.18.0 to 0.18.2, fixing
+  RUSTSEC-2026-0253 (a panic-safety use-after-free in `LruCache::pop`).
 
 ## [0.21.0] — 2026-08-03
 
@@ -1354,7 +1402,8 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/akitaonrails/ai-usagebar/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/akitaonrails/ai-usagebar/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/akitaonrails/ai-usagebar/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/akitaonrails/ai-usagebar/compare/v0.19.0...v0.20.0

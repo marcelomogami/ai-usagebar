@@ -10,6 +10,7 @@ use clap::{Parser, ValueEnum};
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "ai-usagebar",
+    version,
     args_conflicts_with_subcommands = true,
     about = "Waybar widget and terminal dashboard for multi-provider AI plan usage",
     long_about = "\
@@ -252,6 +253,7 @@ pub enum Vendor {
     Novita,
     Moonshot,
     Grok,
+    Supergrok,
     Antigravity,
     Cursor,
     Minimax,
@@ -272,6 +274,7 @@ impl Vendor {
             Vendor::Novita => crate::vendor::VendorId::Novita,
             Vendor::Moonshot => crate::vendor::VendorId::Moonshot,
             Vendor::Grok => crate::vendor::VendorId::Grok,
+            Vendor::Supergrok => crate::vendor::VendorId::Supergrok,
             Vendor::Antigravity => crate::vendor::VendorId::Antigravity,
             Vendor::Cursor => crate::vendor::VendorId::Cursor,
             Vendor::Minimax => crate::vendor::VendorId::Minimax,
@@ -359,6 +362,7 @@ fn id_to_vendor(id: crate::vendor::VendorId) -> Vendor {
         crate::vendor::VendorId::Novita => Vendor::Novita,
         crate::vendor::VendorId::Moonshot => Vendor::Moonshot,
         crate::vendor::VendorId::Grok => Vendor::Grok,
+        crate::vendor::VendorId::Supergrok => Vendor::Supergrok,
         crate::vendor::VendorId::Antigravity => Vendor::Antigravity,
         crate::vendor::VendorId::Cursor => Vendor::Cursor,
         crate::vendor::VendorId::Minimax => Vendor::Minimax,
@@ -389,7 +393,19 @@ fn is_stdout_tty() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{Parser, error::ErrorKind};
+
+    #[test]
+    fn version_flags_report_the_crate_version() {
+        let expected = format!("ai-usagebar {}\n", env!("CARGO_PKG_VERSION"));
+
+        for flag in ["--version", "-V"] {
+            let err = Cli::try_parse_from(["ai-usagebar", flag])
+                .expect_err("a version flag exits through clap's display path");
+            assert_eq!(err.kind(), ErrorKind::DisplayVersion, "flag: {flag}");
+            assert_eq!(err.to_string(), expected, "flag: {flag}");
+        }
+    }
 
     #[test]
     fn usage_subcommand_parses_machine_readable_mode() {
