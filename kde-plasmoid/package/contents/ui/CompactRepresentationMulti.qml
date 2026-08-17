@@ -130,24 +130,14 @@ MouseArea {
                         }
 
                         PlasmaComponents.Label {
-                            Layout.minimumWidth: implicitWidthFor100
-                            Layout.preferredWidth: implicitWidthFor100
-                            readonly property real implicitWidthFor100: metrics.advanceWidth
                             text: metric.row && metric.row.percent !== null
                                 ? metric.row.percent + "%" : "—"
-                            horizontalAlignment: Text.AlignLeft
                             color: metric.row
                                 ? (Logic.severityColor(metric.row.severity, root.applet.colors)
                                     ?? Kirigami.Theme.textColor)
                                 : Kirigami.Theme.textColor
                             font.family: "monospace"
                             textFormat: Text.PlainText
-
-                            TextMetrics {
-                                id: metrics
-                                font: parent.font
-                                text: "100%"
-                            }
                         }
 
                         PlasmaComponents.Label {
