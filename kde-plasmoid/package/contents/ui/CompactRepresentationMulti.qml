@@ -18,6 +18,9 @@ MouseArea {
 
     readonly property bool vertical: Plasmoid.formFactor === PlasmaCore.Types.Vertical
 
+    implicitWidth: content.implicitWidth
+    implicitHeight: content.implicitHeight
+
     Layout.minimumWidth: root.vertical ? 0 : content.implicitWidth
     Layout.preferredWidth: root.vertical ? 0 : content.implicitWidth
     Layout.minimumHeight: root.vertical ? content.implicitHeight : 0
@@ -69,8 +72,13 @@ MouseArea {
             delegate: RowLayout {
                 id: provider
                 required property var modelData
+                required property int index
 
                 spacing: Kirigami.Units.smallSpacing
+                Layout.leftMargin: !root.vertical && provider.index > 0
+                    ? Kirigami.Units.largeSpacing : 0
+                Layout.topMargin: root.vertical && provider.index > 0
+                    ? Kirigami.Units.smallSpacing : 0
                 opacity: provider.modelData.stale ? 0.65 : 1
 
                 HoverHandler {
@@ -81,8 +89,8 @@ MouseArea {
                 }
 
                 Kirigami.Icon {
-                    implicitWidth: Kirigami.Units.iconSizes.smallMedium
-                    implicitHeight: Kirigami.Units.iconSizes.smallMedium
+                    implicitWidth: Kirigami.Units.iconSizes.small
+                    implicitHeight: Kirigami.Units.iconSizes.small
                     source: provider.modelData.id === "openai"
                         ? Qt.resolvedUrl("../icons/openai.svg")
                         : Qt.resolvedUrl("../icons/claude.svg")
