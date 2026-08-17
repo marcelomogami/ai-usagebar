@@ -135,6 +135,7 @@ MouseArea {
                                 ? (Logic.severityColor(metric.row.severity, root.applet.colors)
                                     ?? Kirigami.Theme.textColor)
                                 : Kirigami.Theme.textColor
+                            font.bold: true
                             font.family: "monospace"
                             textFormat: Text.PlainText
                         }

@@ -111,6 +111,8 @@ assert.match(multiCompactQml, /Layout\.leftMargin:\s*metric\.index\s*>\s*0/,
     'adjacent usage windows must have an explicit visual separator');
 assert.doesNotMatch(multiCompactQml, /implicitWidthFor100|text:\s*"100%"/,
     'usage values must use their natural width instead of reserving room for 100%');
+assert.match(multiCompactQml, /metric\.row\.percent\s*\+\s*"%"[\s\S]*?font\.bold:\s*true/,
+    'the used percentage must carry the compact view emphasis');
 assert.doesNotMatch(multiCompactQml, /text:\s*metric\.modelData\s*\+\s*":"[^}]*opacity:/,
     'window labels must remain at full opacity');
 assert.match(multiCompactQml, /text:\s*root\.resetText\([\s\S]*?opacity:\s*0\.7/,
