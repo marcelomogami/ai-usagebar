@@ -1,7 +1,6 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import QtQuick.Layouts
 import org.kde.plasma.plasmoid
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.plasma5support as Plasma5Support
@@ -87,22 +86,8 @@ PlasmoidItem {
             root.launchTui();
     }
 
-    compactRepresentation: Loader {
-        id: compactLoader
-        sourceComponent: root.multiProvider ? multiCompact : singleCompact
-        Layout.minimumWidth: childrenRect.width
-        Layout.preferredWidth: Layout.minimumWidth
-        Layout.minimumHeight: childrenRect.height
-        Layout.preferredHeight: Layout.minimumHeight
-    }
-    fullRepresentation: Loader {
-        id: fullLoader
-        sourceComponent: root.multiProvider ? multiFull : singleFull
-        Layout.minimumWidth: childrenRect.width
-        Layout.preferredWidth: Layout.minimumWidth
-        Layout.minimumHeight: childrenRect.height
-        Layout.preferredHeight: Layout.minimumHeight
-    }
+    compactRepresentation: root.multiProvider ? multiCompact : singleCompact
+    fullRepresentation: root.multiProvider ? multiFull : singleFull
 
     Component { id: singleCompact; CompactRepresentation { applet: root } }
     Component { id: multiCompact; CompactRepresentationMulti { applet: root } }

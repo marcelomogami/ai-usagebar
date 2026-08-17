@@ -93,14 +93,18 @@ assert.match(mainQml, /FullRepresentationMulti\s*\{\s*applet:\s*root\s*\}/,
     'main.qml must keep the dedicated multi-provider popup');
 assert.match(mainQml, /Logic\.displayedEntries\(/,
     'main.qml must project all configured providers instead of one active entry');
-assert.match(mainQml, /compactRepresentation:\s*Loader\s*\{[\s\S]*?Layout\.minimumWidth:\s*childrenRect\.width/,
-    'the compact Loader must expose the loaded representation width to Plasma');
-assert.match(mainQml, /fullRepresentation:\s*Loader\s*\{[\s\S]*?Layout\.minimumHeight:\s*childrenRect\.height/,
-    'the popup Loader must expose the loaded representation height to Plasma');
+assert.match(mainQml, /compactRepresentation:\s*root\.multiProvider\s*\?\s*multiCompact\s*:\s*singleCompact/,
+    'Plasma must receive the selected compact Component directly, without a Loader');
+assert.match(mainQml, /fullRepresentation:\s*root\.multiProvider\s*\?\s*multiFull\s*:\s*singleFull/,
+    'Plasma must receive the selected popup Component directly, without a Loader');
+assert.doesNotMatch(mainQml, /compactRepresentation:\s*Loader/,
+    'a Loader hides the compact item layout hints from the Plasma panel');
 assert.match(multiCompactQml, /implicitWidth:\s*content\.implicitWidth/,
     'the multi-provider component must expose its content width to Plasma');
 assert.match(multiCompactQml, /implicitHeight:\s*content\.implicitHeight/,
     'the multi-provider component must expose its content height to Plasma');
+assert.match(multiCompactQml, /anchors\.left:\s*parent\.left/,
+    'constrained panel space must preserve the beginning of the provider list');
 assert.match(multiCompactQml, /\["5h",\s*"7d"\]/,
     'the Claude compact block must keep both 5h and 7d windows');
 assert.match(multiCompactQml, /entry\.id\s*===\s*"openai"[\s\S]*?return\s*\["7d"\]/,
