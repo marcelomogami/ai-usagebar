@@ -93,6 +93,10 @@ assert.match(mainQml, /FullRepresentationMulti\s*\{\s*applet:\s*root\s*\}/,
     'main.qml must keep the dedicated multi-provider popup');
 assert.match(mainQml, /Logic\.displayedEntries\(/,
     'main.qml must project all configured providers instead of one active entry');
+assert.match(mainQml, /compactRepresentation:\s*Loader\s*\{[\s\S]*?Layout\.minimumWidth:\s*childrenRect\.width/,
+    'the compact Loader must expose the loaded representation width to Plasma');
+assert.match(mainQml, /fullRepresentation:\s*Loader\s*\{[\s\S]*?Layout\.minimumHeight:\s*childrenRect\.height/,
+    'the popup Loader must expose the loaded representation height to Plasma');
 assert.match(multiCompactQml, /implicitWidth:\s*content\.implicitWidth/,
     'the multi-provider component must expose its content width to Plasma');
 assert.match(multiCompactQml, /implicitHeight:\s*content\.implicitHeight/,
