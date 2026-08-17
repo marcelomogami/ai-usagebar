@@ -26,6 +26,7 @@ Item {
     UsageRows {
         id: content
         applet: tip.applet
+        entry: tip.applet.tooltipEntry
         anchors.fill: parent
     }
 }
