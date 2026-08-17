@@ -54,7 +54,8 @@ MouseArea {
 
     GridLayout {
         id: content
-        anchors.centerIn: parent
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
         flow: root.vertical ? GridLayout.TopToBottom : GridLayout.LeftToRight
         columnSpacing: Kirigami.Units.largeSpacing
         rowSpacing: Kirigami.Units.smallSpacing
