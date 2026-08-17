@@ -111,6 +111,10 @@ assert.match(multiCompactQml, /Layout\.leftMargin:\s*metric\.index\s*>\s*0/,
     'adjacent usage windows must have an explicit visual separator');
 assert.doesNotMatch(multiCompactQml, /implicitWidthFor100|text:\s*"100%"/,
     'usage values must use their natural width instead of reserving room for 100%');
+assert.doesNotMatch(multiCompactQml, /text:\s*metric\.modelData\s*\+\s*":"[^}]*opacity:/,
+    'window labels must remain at full opacity');
+assert.match(multiCompactQml, /text:\s*root\.resetText\([\s\S]*?opacity:\s*0\.7/,
+    'reset timestamps must be visually subordinate');
 assert.match(multiCompactQml, /\["5h",\s*"7d"\]/,
     'the Claude compact block must keep both 5h and 7d windows');
 assert.match(multiCompactQml, /entry\.id\s*===\s*"openai"[\s\S]*?return\s*\["7d"\]/,

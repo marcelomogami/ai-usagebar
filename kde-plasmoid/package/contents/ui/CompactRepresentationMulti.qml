@@ -124,7 +124,6 @@ MouseArea {
 
                         PlasmaComponents.Label {
                             text: metric.modelData + ":"
-                            opacity: 0.7
                             font.family: "monospace"
                             textFormat: Text.PlainText
                         }
@@ -168,6 +167,7 @@ MouseArea {
                             Layout.minimumWidth: resetMetrics.advanceWidth
                             Layout.preferredWidth: resetMetrics.advanceWidth
                             text: root.resetText(metric.row, metric.modelData)
+                            opacity: 0.7
                             font.family: "monospace"
                             textFormat: Text.PlainText
 
