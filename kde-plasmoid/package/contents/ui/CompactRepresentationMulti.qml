@@ -77,7 +77,7 @@ MouseArea {
 
                 spacing: Kirigami.Units.smallSpacing
                 Layout.leftMargin: !root.vertical && provider.index > 0
-                    ? Kirigami.Units.largeSpacing : 0
+                    ? Kirigami.Units.largeSpacing * 2 : 0
                 Layout.topMargin: root.vertical && provider.index > 0
                     ? Kirigami.Units.smallSpacing : 0
                 opacity: provider.modelData.stale ? 0.65 : 1
@@ -90,8 +90,8 @@ MouseArea {
                 }
 
                 Kirigami.Icon {
-                    implicitWidth: Kirigami.Units.iconSizes.small
-                    implicitHeight: Kirigami.Units.iconSizes.small
+                    implicitWidth: 12
+                    implicitHeight: 12
                     source: provider.modelData.id === "openai"
                         ? Qt.resolvedUrl("../icons/openai.svg")
                         : Qt.resolvedUrl("../icons/claude.svg")
@@ -115,9 +115,12 @@ MouseArea {
                     delegate: RowLayout {
                         id: metric
                         required property string modelData
+                        required property int index
                         readonly property var row: Logic.metricForWindow(
                             provider.modelData, metric.modelData)
                         spacing: Math.round(Kirigami.Units.smallSpacing / 2)
+                        Layout.leftMargin: metric.index > 0
+                            ? Kirigami.Units.largeSpacing : 0
 
                         PlasmaComponents.Label {
                             text: metric.modelData + ":"
