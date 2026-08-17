@@ -69,6 +69,7 @@ pub struct CompactCell {
 pub(crate) struct SectionProjection {
     pub section: Section,
     pub reset_at: Option<DateTime<Utc>>,
+    pub elapsed_percent: Option<i32>,
 }
 
 struct SectionBuilder(Vec<SectionProjection>);
@@ -86,6 +87,7 @@ impl SectionBuilder {
                     SectionProjection {
                         section,
                         reset_at: None,
+                        elapsed_percent: None,
                     }
                 })
                 .collect(),
@@ -100,12 +102,26 @@ impl SectionBuilder {
         self.0.push(SectionProjection {
             section,
             reset_at: None,
+            elapsed_percent: None,
         });
     }
 
     fn push_metric(&mut self, section: Section, reset_at: Option<DateTime<Utc>>) {
+        self.push_metric_with_pacing(section, reset_at, None);
+    }
+
+    fn push_metric_with_pacing(
+        &mut self,
+        section: Section,
+        reset_at: Option<DateTime<Utc>>,
+        elapsed_percent: Option<i32>,
+    ) {
         assert!(matches!(section, Section::Metric { .. }));
-        self.0.push(SectionProjection { section, reset_at });
+        self.0.push(SectionProjection {
+            section,
+            reset_at,
+            elapsed_percent,
+        });
     }
 }
 
@@ -1065,8 +1081,9 @@ fn push_window(
 ) {
     let pct = w.utilization_pct.clamp(0, 100) as u16;
     let reset_text = countdown::format(w.resets_at, now);
-    let footnote = if show_pacing {
-        let p = pacing::calc(w.utilization_pct, w.resets_at, now, w.window_duration, tol);
+    let pacing = show_pacing
+        .then(|| pacing::calc(w.utilization_pct, w.resets_at, now, w.window_duration, tol));
+    let footnote = if let Some(p) = &pacing {
         format!(
             "Resets in {} · {}% elapsed · {}",
             reset_text, p.elapsed_pct, p.point_label
@@ -1075,7 +1092,7 @@ fn push_window(
         format!("Resets in {}", reset_text)
     };
     sections.push(Section::Spacer);
-    sections.push_metric(
+    sections.push_metric_with_pacing(
         Section::Metric {
             label: label.into(),
             pct,
@@ -1084,6 +1101,7 @@ fn push_window(
             footnote,
         },
         w.resets_at,
+        pacing.map(|p| p.elapsed_pct),
     );
 }
 

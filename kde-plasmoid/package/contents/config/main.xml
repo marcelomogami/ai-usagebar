@@ -10,6 +10,14 @@
   <kcfgfile name=""/>
 
   <group name="General">
+    <entry name="multiProvider" type="Bool">
+      <default>true</default>
+    </entry>
+
+    <entry name="displayedVendors" type="StringList">
+      <default>anthropic,openai</default>
+    </entry>
+
     <!-- The vendor shown right now. The aggregate command omits a vendor and
          this applet selects an entry client-side, so it never reads
          ~/.cache/ai-usagebar/active_vendor. Scrolling one instance cannot move

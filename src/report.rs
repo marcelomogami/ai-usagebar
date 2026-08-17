@@ -47,6 +47,7 @@ enum ReportSection {
     Metric {
         label: String,
         percent: u16,
+        elapsed_percent: Option<i32>,
         value: String,
         detail: String,
         severity: String,
@@ -159,6 +160,7 @@ fn entry_from_state(tab: &TabId, state: &TabState, now: chrono::DateTime<Utc>) -
                 entry.sections.push(ReportSection::Metric {
                     label,
                     percent: pct,
+                    elapsed_percent: projected.elapsed_percent,
                     value: value_label,
                     detail: footnote,
                     severity: severity.as_str().into(),
@@ -220,6 +222,7 @@ fn render_json_for_primary(entries: &[Entry], primary: Option<&str>) -> String {
                     ReportSection::Metric {
                         label,
                         percent,
+                        elapsed_percent,
                         value,
                         detail,
                         severity,
@@ -227,6 +230,7 @@ fn render_json_for_primary(entries: &[Entry], primary: Option<&str>) -> String {
                     } => Some(json!({
                         "label": label,
                         "percent": percent,
+                        "elapsed_percent": elapsed_percent,
                         "value": value,
                         "detail": detail,
                         "severity": severity,
@@ -337,7 +341,8 @@ mod tests {
     use super::*;
     use crate::tui::app::ReadyTab;
     use crate::usage::{
-        DeepseekSnapshot, KimiSnapshot, KiroSnapshot, OpenRouterSnapshot, VendorSnapshot,
+        AnthropicSnapshot, DeepseekSnapshot, KimiSnapshot, KiroSnapshot, OpenRouterSnapshot,
+        UsageWindow, VendorSnapshot,
     };
     use crate::vendor::VendorId;
 
@@ -358,6 +363,7 @@ mod tests {
         ReportSection::Metric {
             label: label.into(),
             percent,
+            elapsed_percent: None,
             value: value.into(),
             detail: detail.into(),
             severity: "mid".into(),
@@ -492,6 +498,40 @@ mod tests {
         assert_eq!(first["metrics"][0]["reset_at"], reset_rfc3339);
         assert_eq!(first["sections"][1]["reset_at"], reset_rfc3339);
         assert_eq!(first["metrics"][0]["severity"], "low");
+    }
+
+    #[test]
+    fn json_exposes_elapsed_percent_as_structured_pacing_data() {
+        let now = Utc::now();
+        let state = TabState::Ready(Box::new(ReadyTab {
+            snapshot: VendorSnapshot::Anthropic(AnthropicSnapshot {
+                plan: "Claude Pro".into(),
+                session: UsageWindow {
+                    utilization_pct: 42,
+                    resets_at: Some(now + chrono::Duration::minutes(150)),
+                    window_duration: chrono::Duration::hours(5),
+                },
+                weekly: UsageWindow {
+                    utilization_pct: 31,
+                    resets_at: Some(now + chrono::Duration::hours(84)),
+                    window_duration: chrono::Duration::days(7),
+                },
+                sonnet: None,
+                scoped: Vec::new(),
+                extra: None,
+            }),
+            stale: false,
+            last_error: None,
+            fetched_at: Some(now),
+        }));
+
+        let projected = entry_from_state(&TabId::vendor(VendorId::Anthropic), &state, now);
+        let rendered = render_json_for_primary(&[projected], None);
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let metrics = value["entries"][0]["metrics"].as_array().unwrap();
+
+        assert_eq!(metrics[0]["elapsed_percent"], 50);
+        assert_eq!(metrics[1]["elapsed_percent"], 50);
     }
 
     #[test]

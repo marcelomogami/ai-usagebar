@@ -104,6 +104,12 @@ function finitePercent(value) {
     return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : null;
 }
 
+function optionalPercent(value) {
+    if (value === null || value === undefined || String(value).trim() === '')
+        return null;
+    return finitePercent(value);
+}
+
 // Severity comes from the Rust core, which computes it once for every frontend.
 // Fall back to the documented 50/75/90 bands only when a field is missing or
 // unrecognised, so an older binary still renders sensible colours instead of
@@ -141,6 +147,7 @@ function normalizeSection(raw) {
             label: safeText(raw.label, 120),
             value: safeText(raw.value, 40),
             percent: percent,
+            elapsedPercent: optionalPercent(raw.elapsed_percent),
             detail: safeText(raw.detail, 400),
             resetAt: safeText(raw.reset_at, 64),
             severity: severityOf(percent, raw.severity),
@@ -238,6 +245,26 @@ export function vendorTabs(report, activeId) {
     }));
 }
 
+// Entries shown by the multi-provider panel, in the user's configured order.
+// An empty selection means "all" so a schema migration never paints a blank
+// applet. StringList arrives from KConfig as an array-like QJSValue.
+export function displayedEntries(report, configuredIds) {
+    const entries = (report && report.entries) || [];
+    const ids = toRing(configuredIds);
+    if (!ids.length)
+        return entries.slice();
+    const selected = [];
+    for (const id of ids) {
+        for (const entry of entries) {
+            if (entry.id === id) {
+                selected.push(entry);
+                break;
+            }
+        }
+    }
+    return selected;
+}
+
 export function nextVendor(ring, current, delta) {
     const list = toRing(ring);
     if (!list.length)
@@ -310,6 +337,17 @@ export function detailRows(entry) {
     return entry.sections.filter(s => s.type !== 'spacer');
 }
 
+export function metricForWindow(entry, windowLabel) {
+    if (!entry)
+        return null;
+    const wanted = String(windowLabel ?? '').trim().toLowerCase();
+    for (const section of entry.sections) {
+        if (section.type === 'metric' && windowKey(section.label) === wanted)
+            return section;
+    }
+    return null;
+}
+
 // The panel cells. Each carries its own severity so the compact representation
 // colours per cell rather than by the entry's worst value.
 export function panelCells(entry, options) {
@@ -338,10 +376,22 @@ export function panelCells(entry, options) {
 // so an unrecognised label still shortens to something rather than to nothing.
 export function shortLabel(label) {
     const s = String(label ?? '').trim();
+    const key = windowKey(s);
+    if (key)
+        return key;
     const paren = s.match(/\(([^)]{1,8})\)\s*$/);
     if (paren)
         return paren[1];
     return s.split(/\s+/)[0] || '';
+}
+
+function windowKey(label) {
+    const s = String(label ?? '').trim().toLowerCase();
+    if (/(?:^|[^0-9])5h(?:[^0-9]|$)/.test(s) || /session/.test(s))
+        return '5h';
+    if (/(?:^|[^0-9])7d(?:[^0-9]|$)/.test(s) || /weekly/.test(s))
+        return '7d';
+    return '';
 }
 
 // detail still carries a human-readable "Resets in …" written for CLI readers.

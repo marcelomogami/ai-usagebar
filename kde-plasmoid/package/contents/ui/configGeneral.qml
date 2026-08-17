@@ -25,11 +25,13 @@ KCM.SimpleKCM {
     property alias cfg_colorHigh: highSwatch.hex
     property alias cfg_colorCritical: criticalSwatch.hex
     property alias cfg_colorEmpty: emptySwatch.hex
+    property alias cfg_multiProvider: multiProviderCheck.checked
     // A ComboBox cannot use `property alias` to currentIndex: the alias would be
     // write-only from Plasma's side at load time, so the saved value never shows.
     property int cfg_leftClickAction: 0
     property string cfg_vendor: ""
     property var cfg_vendorRing: []
+    property var cfg_displayedVendors: []
 
     // Which vendors exist and whether they currently work. Sourced from
     // `ai-usagebar usage --json`, which reports every entry enabled in
@@ -79,8 +81,25 @@ KCM.SimpleKCM {
             page.cfg_vendor = next[0];
     }
 
+    function displayedHas(id) {
+        return Array.from(page.cfg_displayedVendors || []).indexOf(id) !== -1;
+    }
+
+    function setDisplayed(id, on) {
+        const next = Array.from(page.cfg_displayedVendors || []).filter(v => v !== id);
+        if (on)
+            next.push(id);
+        page.cfg_displayedVendors = next;
+    }
+
     Kirigami.FormLayout {
         anchors.fill: parent
+
+        QQC2.CheckBox {
+            id: multiProviderCheck
+            Kirigami.FormData.label: i18n("Panel mode:")
+            text: i18n("Show all selected providers at once")
+        }
 
         QQC2.Label {
             Kirigami.FormData.label: i18n("Vendors:")
@@ -104,8 +123,15 @@ KCM.SimpleKCM {
 
                 QQC2.CheckBox {
                     text: choice.modelData.label || choice.modelData.id
-                    checked: page.ringHas(choice.modelData.id)
-                    onToggled: page.setRing(choice.modelData.id, checked)
+                    checked: multiProviderCheck.checked
+                        ? page.displayedHas(choice.modelData.id)
+                        : page.ringHas(choice.modelData.id)
+                    onToggled: {
+                        if (multiProviderCheck.checked)
+                            page.setDisplayed(choice.modelData.id, checked);
+                        else
+                            page.setRing(choice.modelData.id, checked);
+                    }
                 }
 
                 // The plan when the vendor answers, its own error when it does
@@ -131,6 +157,7 @@ KCM.SimpleKCM {
         QQC2.ComboBox {
             id: currentVendorCombo
             Kirigami.FormData.label: i18n("Current vendor:")
+            visible: !multiProviderCheck.checked
             model: Array.from(page.cfg_vendorRing || [])
             textRole: ""
             displayText: page.labelFor(page.cfg_vendor)

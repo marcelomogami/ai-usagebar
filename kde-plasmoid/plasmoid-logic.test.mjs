@@ -6,9 +6,9 @@ import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {
     buildArgv, buildCommand, buildTuiCommand, DEFAULT_BINARY, DEFAULT_TIMEOUT_SECS,
-    detailRows, entryFor, errorMessage, EXIT_KILLED, EXIT_TIMED_OUT, formatDuration,
+    detailRows, displayedEntries, entryFor, errorMessage, EXIT_KILLED, EXIT_TIMED_OUT, formatDuration,
     headline, isAlarming, MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS,
-    metricDetail, nextVendor, paletteFromTheme, panelCells, parseReport,
+    metricDetail, metricForWindow, nextVendor, paletteFromTheme, panelCells, parseReport,
     resetRemainingMs, safeText, severityColor, severityOf, SEVERITIES, shellQuote,
     shortLabel, shouldStartFetch, TIMEOUT_KILL_GRACE_SECS, timeoutSeconds,
     updatedAgeMs, vendorTabs,
@@ -64,6 +64,10 @@ for (let i = configXml.indexOf('<!--'); i !== -1; i = configXml.indexOf('<!--', 
 
 const configUi = readFileSync(at('./package/contents/ui/configGeneral.qml'), 'utf8');
 const mainQml = readFileSync(at('./package/contents/ui/main.qml'), 'utf8');
+const multiCompactQml = readFileSync(
+    at('./package/contents/ui/CompactRepresentationMulti.qml'), 'utf8');
+const multiFullQml = readFileSync(
+    at('./package/contents/ui/FullRepresentationMulti.qml'), 'utf8');
 const entryNames = [...configXml.matchAll(/<entry\s+name="([^"]+)"/g)].map(m => m[1]);
 assert.ok(entryNames.length >= 9, `expected the full schema, found ${entryNames.length} entries`);
 for (const name of entryNames) {
@@ -77,13 +81,49 @@ for (const removed of ['showSession', 'showWeekly', 'showExtra',
         `${removed} was a no-op setting and must not return to the schema`);
 }
 
+// Local multi-provider contract. These assertions intentionally name the
+// extension points that an upstream merge could remove without producing a
+// textual conflict. The updater runs this suite after every integration.
+for (const required of ['multiProvider', 'displayedVendors'])
+    assert.ok(entryNames.includes(required),
+        `the multi-provider config key ${required} disappeared during integration`);
+assert.match(mainQml, /CompactRepresentationMulti\s*\{\s*applet:\s*root\s*\}/,
+    'main.qml must keep the dedicated multi-provider compact representation');
+assert.match(mainQml, /FullRepresentationMulti\s*\{\s*applet:\s*root\s*\}/,
+    'main.qml must keep the dedicated multi-provider popup');
+assert.match(mainQml, /Logic\.displayedEntries\(/,
+    'main.qml must project all configured providers instead of one active entry');
+assert.match(multiCompactQml, /\["5h",\s*"7d"\]/,
+    'the Claude compact block must keep both 5h and 7d windows');
+assert.match(multiCompactQml, /entry\.id\s*===\s*"openai"[\s\S]*?return\s*\["7d"\]/,
+    'the Codex compact block must start directly at the 7d window');
+assert.match(multiCompactQml, /elapsedPercent/,
+    'the compact representation must keep pacing visible');
+assert.match(multiCompactQml, /view-refresh-symbolic/,
+    'the compact representation must keep the reset icon visible');
+assert.match(multiCompactQml, /\.\.\/icons\/claude\.svg/,
+    'the compact representation must keep the Claude icon');
+assert.match(multiCompactQml, /\.\.\/icons\/openai\.svg/,
+    'the compact representation must keep the OpenAI icon');
+assert.doesNotMatch(multiCompactQml, /onWheel\s*:/,
+    'the multi-provider representation must not cycle providers with the wheel');
+assert.doesNotMatch(multiCompactQml, /launchTui\s*\(/,
+    'the multi-provider representation must not launch the TUI');
+assert.match(multiFullQml, /model:\s*full\.applet\.displayedEntries/,
+    'the popup must render every selected provider');
+assert.match(multiFullQml, /ProviderDetails\s*\{/,
+    'the popup must keep providers as vertically repeated detail blocks');
+
 // All Label/Heading text sinks opt out of AutoText. Report strings may include
 // provider-controlled text; AutoText can treat an <img> tag as rich text and
 // fetch its source when the popup opens.
 for (const rel of [
     './package/contents/ui/ColorSwatch.qml',
     './package/contents/ui/CompactRepresentation.qml',
+    './package/contents/ui/CompactRepresentationMulti.qml',
     './package/contents/ui/FullRepresentation.qml',
+    './package/contents/ui/FullRepresentationMulti.qml',
+    './package/contents/ui/ProviderDetails.qml',
     './package/contents/ui/UsageRow.qml',
     './package/contents/ui/UsageRows.qml',
     './package/contents/ui/configGeneral.qml',
@@ -124,10 +164,12 @@ const RAW = JSON.stringify({
             sections: [
                 {type: 'spacer'},
                 {type: 'metric', label: 'Session (5h)', value: '62%', percent: 62,
+                    elapsed_percent: 40,
                     severity: 'mid', reset_at: '2026-01-01T02:00:00Z',
                     detail: 'Resets in 2h · 40% elapsed · 22pts over'},
                 {type: 'spacer'},
                 {type: 'metric', label: 'Weekly (7d)', value: '91%', percent: 91,
+                    elapsed_percent: 55,
                     severity: 'critical', reset_at: '2026-01-04T00:00:00Z',
                     detail: 'Resets in 3d'},
             ],
@@ -136,7 +178,12 @@ const RAW = JSON.stringify({
             id: 'openai', display_name: 'Codex', name: 'openai', plan: 'Plus',
             status: 'ready', stale: true, error: null,
             fetched_at: '2026-01-01T00:00:00Z',
-            sections: [{type: 'block', label: 'Credits', body: ['balance: $4.10']}],
+            sections: [
+                {type: 'metric', label: 'Codex weekly', value: '68%', percent: 68,
+                    elapsed_percent: 40, severity: 'mid',
+                    reset_at: '2026-01-04T00:00:00Z', detail: '40% elapsed'},
+                {type: 'block', label: 'Credits', body: ['balance: $4.10']},
+            ],
         },
         {
             id: 'zai', display_name: 'Z.AI', name: 'zai', plan: '',
@@ -254,10 +301,26 @@ assert.equal(isAlarming(null), false);
 // double it.
 assert.equal(detailRows(anthropic).length, 2);
 assert.deepEqual(detailRows(anthropic).map(r => r.type), ['metric', 'metric']);
-assert.deepEqual(detailRows(openai).map(r => r.type), ['block']);
+assert.deepEqual(detailRows(openai).map(r => r.type), ['metric', 'block']);
 assert.deepEqual(detailRows(null), []);
 // A block section keeps its free-form lines rather than being flattened away.
-assert.deepEqual(detailRows(openai)[0].body, ['balance: $4.10']);
+assert.deepEqual(detailRows(openai)[1].body, ['balance: $4.10']);
+
+assert.deepEqual(displayedEntries(report, ['anthropic', 'openai']).map(e => e.id),
+    ['anthropic', 'openai']);
+assert.deepEqual(displayedEntries(report, ['openai', 'anthropic']).map(e => e.id),
+    ['openai', 'anthropic'], 'the configured order controls the panel order');
+assert.deepEqual(displayedEntries(report, []).map(e => e.id),
+    ['anthropic', 'openai', 'zai'], 'an empty selection degrades to every report entry');
+assert.deepEqual(displayedEntries(report, {0: 'openai', 1: 'anthropic', length: 2}).map(e => e.id),
+    ['openai', 'anthropic'], 'KConfig array-like string lists are supported');
+
+assert.equal(metricForWindow(anthropic, '5h').percent, 62);
+assert.equal(metricForWindow(anthropic, '5h').elapsedPercent, 40);
+assert.equal(metricForWindow(anthropic, '7d').percent, 91);
+assert.equal(metricForWindow(openai, '5h'), null);
+assert.equal(metricForWindow(openai, '7d').percent, 68);
+assert.equal(metricForWindow(zai, '7d'), null);
 
 assert.deepEqual(panelCells(anthropic, {max: 2}).map(c => c.text), ['62%', '91%']);
 assert.deepEqual(panelCells(anthropic, {max: 2}).map(c => c.label), ['5h', '7d']);
@@ -267,11 +330,12 @@ assert.equal(panelCells(anthropic, {max: 2})[1].severity, 'critical');
 // confident 0%.
 assert.deepEqual(panelCells(zai).map(c => c.text), ['⚠']);
 assert.deepEqual(panelCells(null), []);
-// A vendor whose only section is a block has no percentage to plot.
-assert.deepEqual(panelCells(openai), []);
+assert.deepEqual(panelCells(openai).map(c => c.text), ['68%']);
 
 assert.equal(shortLabel('Session (5h)'), '5h');
 assert.equal(shortLabel('Weekly (7d)'), '7d');
+assert.equal(shortLabel('Codex weekly'), '7d');
+assert.equal(shortLabel('Codex 5h'), '5h');
 // The parenthetical is the window descriptor, which is exactly the tag the
 // panel wants — even when it is a word rather than a duration.
 assert.equal(shortLabel('MCP tools (monthly)'), 'monthly');

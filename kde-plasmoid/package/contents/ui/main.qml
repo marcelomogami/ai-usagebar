@@ -38,6 +38,13 @@ PlasmoidItem {
     readonly property string vendor: Plasmoid.configuration.vendor
     readonly property var entry: Logic.entryFor(root.report, root.vendor)
     readonly property var tabs: Logic.vendorTabs(root.report, root.vendor)
+    readonly property bool multiProvider: Plasmoid.configuration.multiProvider
+    readonly property var displayedEntries: Logic.displayedEntries(
+        root.report, Plasmoid.configuration.displayedVendors)
+    property string hoveredVendorId: ""
+    readonly property var tooltipEntry: root.hoveredVendorId
+        ? Logic.entryFor(root.report, root.hoveredVendorId)
+        : (root.displayedEntries.length > 0 ? root.displayedEntries[0] : root.entry)
     readonly property var compactCells: Logic.panelCells(root.entry, {max: 2})
     readonly property bool showBars: Plasmoid.configuration.showBars
 
@@ -72,18 +79,28 @@ PlasmoidItem {
 
     // When left click launches the TUI, the global shortcut and Enter/Space
     // must not still open a popup we have decided not to use.
-    activationTogglesExpanded: Plasmoid.configuration.leftClickAction === 0
+    activationTogglesExpanded: root.multiProvider
+        || Plasmoid.configuration.leftClickAction === 0
     Plasmoid.onActivated: {
-        if (Plasmoid.configuration.leftClickAction === 1)
+        if (!root.multiProvider && Plasmoid.configuration.leftClickAction === 1)
             root.launchTui();
     }
 
-    compactRepresentation: CompactRepresentation { applet: root }
-    fullRepresentation: FullRepresentation { applet: root }
+    compactRepresentation: Loader {
+        sourceComponent: root.multiProvider ? multiCompact : singleCompact
+    }
+    fullRepresentation: Loader {
+        sourceComponent: root.multiProvider ? multiFull : singleFull
+    }
 
-    toolTipMainText: root.entry ? root.entry.label : i18n("AI Usage Bar")
+    Component { id: singleCompact; CompactRepresentation { applet: root } }
+    Component { id: multiCompact; CompactRepresentationMulti { applet: root } }
+    Component { id: singleFull; FullRepresentation { applet: root } }
+    Component { id: multiFull; FullRepresentationMulti { applet: root } }
+
+    toolTipMainText: root.tooltipEntry ? root.tooltipEntry.label : i18n("AI Usage Bar")
     toolTipSubText: root.failure ? root.failure
-        : (root.entry ? (root.entry.plan || root.entry.status) : i18n("Loading…"))
+        : (root.tooltipEntry ? (root.tooltipEntry.plan || root.tooltipEntry.status) : i18n("Loading…"))
     toolTipItem: UsageToolTip { applet: root }
 
     // Wording deliberately identical to the GNOME dropdown and the macOS menu.
@@ -111,10 +128,11 @@ PlasmoidItem {
                       : i18n("Reset due");
     }
 
-    function updatedText() {
-        if (!root.entry)
+    function updatedText(forEntry) {
+        const selected = forEntry || root.entry;
+        if (!selected)
             return "";
-        const ms = Logic.updatedAgeMs(root.entry.fetchedAt, root.nowMs);
+        const ms = Logic.updatedAgeMs(selected.fetchedAt, root.nowMs);
         if (ms === null)
             return i18n("Updated time unavailable");
         const base = ms < 60000 ? i18n("Updated just now")
@@ -123,22 +141,24 @@ PlasmoidItem {
     }
 
     // The one line that explains a non-normal state, "" when all is well.
-    function statusMessage() {
+    function statusMessage(forEntry) {
+        const selected = forEntry || root.entry;
         if (root.failure)
             return root.failure;
         if (!root.report)
             return "";
-        if (!root.entry)
+        if (!selected)
             return i18n("No configured provider reported usage.");
-        if (root.entry.status === "error" || root.entry.error)
-            return Logic.errorMessage(root.entry.error);
-        if (root.entry.stale)
+        if (selected.status === "error" || selected.error)
+            return Logic.errorMessage(selected.error);
+        if (selected.stale)
             return i18n("Cached data · the provider could not supply a fresh response.");
         return "";
     }
 
-    function statusIsUrgent() {
-        return root.failure !== "" || (!!root.entry && root.entry.status === "error");
+    function statusIsUrgent(forEntry) {
+        const selected = forEntry || root.entry;
+        return root.failure !== "" || (!!selected && selected.status === "error");
     }
 
     // --- data --------------------------------------------------------------

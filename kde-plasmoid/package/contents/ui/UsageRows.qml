@@ -12,8 +12,8 @@ ColumnLayout {
 
     required property var applet
 
-    readonly property var entry: rows.applet.entry
-    readonly property string status: rows.applet.statusMessage()
+    property var entry: rows.applet.entry
+    readonly property string status: rows.applet.statusMessage(rows.entry)
     readonly property var list: Logic.detailRows(rows.entry)
 
     spacing: Kirigami.Units.smallSpacing
@@ -41,7 +41,7 @@ ColumnLayout {
         visible: text !== ""
         wrapMode: Text.WordWrap
         font: Kirigami.Theme.smallFont
-        color: rows.applet.statusIsUrgent()
+        color: rows.applet.statusIsUrgent(rows.entry)
             ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
         text: rows.status
         textFormat: Text.PlainText
@@ -67,7 +67,7 @@ ColumnLayout {
         horizontalAlignment: Text.AlignHCenter
         font: Kirigami.Theme.smallFont
         opacity: 0.6
-        text: rows.applet.updatedText()
+        text: rows.applet.updatedText(rows.entry)
         textFormat: Text.PlainText
     }
 }
