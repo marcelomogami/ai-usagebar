@@ -135,7 +135,7 @@ MouseArea {
                             readonly property real implicitWidthFor100: metrics.advanceWidth
                             text: metric.row && metric.row.percent !== null
                                 ? metric.row.percent + "%" : "—"
-                            horizontalAlignment: Text.AlignRight
+                            horizontalAlignment: Text.AlignLeft
                             color: metric.row
                                 ? (Logic.severityColor(metric.row.severity, root.applet.colors)
                                     ?? Kirigami.Theme.textColor)
