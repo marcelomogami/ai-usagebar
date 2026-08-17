@@ -109,8 +109,8 @@ assert.match(multiCompactQml, /implicitWidth:\s*12[\s\S]*?implicitHeight:\s*12/,
     'provider icons must remain subordinate to the compact usage text');
 assert.match(multiCompactQml, /Layout\.leftMargin:\s*metric\.index\s*>\s*0/,
     'adjacent usage windows must have an explicit visual separator');
-assert.match(multiCompactQml, /implicitWidthFor100:[\s\S]*?horizontalAlignment:\s*Text\.AlignLeft/,
-    'usage values must stay next to their labels while retaining a stable width');
+assert.doesNotMatch(multiCompactQml, /implicitWidthFor100|text:\s*"100%"/,
+    'usage values must use their natural width instead of reserving room for 100%');
 assert.match(multiCompactQml, /\["5h",\s*"7d"\]/,
     'the Claude compact block must keep both 5h and 7d windows');
 assert.match(multiCompactQml, /entry\.id\s*===\s*"openai"[\s\S]*?return\s*\["7d"\]/,
