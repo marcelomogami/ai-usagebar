@@ -9,6 +9,46 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-16
+
+### Added
+
+- **KDE Plasma 6 plasmoid** (`kde-plasmoid/`). The native panel widget renders
+  every provider returned by `ai-usagebar usage --json`, follows the active
+  Plasma colour scheme, and keeps provider selection per applet instance. It
+  includes a popup, live reset countdowns, configurable compact bars, and Qt 6
+  and Node regression suites.
+
+### Fixed
+
+- **Aggregate views now source a Claude label shared by a CLI account and a
+  Desktop profile only from Desktop.** The same account in two stores means two
+  of them refreshing one rotating refresh token — each refresh invalidates the
+  other's copy — and the CLI copy can even refresh to a stale/wrong identity
+  that still authenticates but reports another account's (often zero) usage. The
+  symptom: a heavily-used account showing 0% while its Desktop token returns the
+  real number. The previous guard only dropped a CLI entry whose credential was
+  *empty* (a half-finished `account add`), which cannot catch a token that
+  authenticates but is misattributed. On a label collision the app-maintained
+  Desktop token now always wins, which both avoids the rotation war and stops
+  the silent misattribution. A CLI account with no Desktop profile of the same
+  name is unaffected. Direct widget commands remain explicit: add `--desktop`
+  when selecting the Desktop profile with `--account`.
+
+## [1.0.3] — 2026-08-15
+
+### Security
+
+- macOS OAuth refreshes now update Claude Code's login-Keychain entry through
+  Security.framework instead of placing access and refresh tokens in a
+  subprocess argument list.
+- Unix configuration files containing inline API keys are automatically
+  tightened to mode `0600`; the app fails closed if it cannot protect them.
+- Cached and live user-facing authentication failures discard provider response
+  bodies, and widget fallback diagnostics are Pango-escaped before display.
+- Claude and Grok subprocesses no longer inherit API keys belonging to unrelated
+  ai-usagebar providers.
+
 ## [1.0.2] — 2026-08-14
 
 ### Changed
@@ -1469,7 +1509,9 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.3...v1.1.0
+[1.0.3]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/akitaonrails/ai-usagebar/compare/v0.22.0...v1.0.0
