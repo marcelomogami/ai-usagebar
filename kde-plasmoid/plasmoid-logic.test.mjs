@@ -93,6 +93,10 @@ assert.match(mainQml, /FullRepresentationMulti\s*\{\s*applet:\s*root\s*\}/,
     'main.qml must keep the dedicated multi-provider popup');
 assert.match(mainQml, /Logic\.displayedEntries\(/,
     'main.qml must project all configured providers instead of one active entry');
+assert.match(multiCompactQml, /implicitWidth:\s*content\.implicitWidth/,
+    'the multi-provider component must expose its content width to Plasma');
+assert.match(multiCompactQml, /implicitHeight:\s*content\.implicitHeight/,
+    'the multi-provider component must expose its content height to Plasma');
 assert.match(multiCompactQml, /\["5h",\s*"7d"\]/,
     'the Claude compact block must keep both 5h and 7d windows');
 assert.match(multiCompactQml, /entry\.id\s*===\s*"openai"[\s\S]*?return\s*\["7d"\]/,
