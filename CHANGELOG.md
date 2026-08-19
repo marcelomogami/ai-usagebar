@@ -9,6 +9,34 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-08-19
+
+### Added
+
+- OpenRouter supports multiple named keys through `[[openrouter.accounts]]`.
+  Named accounts work with `--account`, appear separately in aggregate views,
+  and keep isolated caches; existing singular `[openrouter]` configs and cache
+  paths remain unchanged.
+- Z.AI and MiniMax now expose pace and elapsed-time placeholders
+  (`{zai_session_elapsed}`, `{zai_session_pace}`, `{zai_weekly_elapsed}`,
+  `{zai_weekly_pace}`, `{zai_mcp_elapsed}`, `{zai_mcp_pace}`,
+  `{minimax_session_elapsed}`, `{minimax_session_pace}`,
+  `{minimax_weekly_elapsed}`, `{minimax_weekly_pace}`,
+  `{minimax_video_elapsed}`, `{minimax_video_pace}`,
+  `{minimax_video_weekly_reset}`, `{minimax_video_weekly_elapsed}`,
+  `{minimax_video_weekly_pace}`, and their `_pace_indicator` variants), plus
+  the cross-vendor `{session_elapsed}` / `{weekly_elapsed}` aliases — the macOS
+  menu bar's pace marker now renders for both vendors the same way it already
+  does for Claude and Codex.
+
+### Fixed
+
+- Omarchy now reports a missing `ai-usagebar` binary with the required install
+  command instead of leaving the Quattro widget stuck in its loading state.
+- Omarchy's Quattro panel no longer evaluates hidden row components against
+  incompatible report rows, eliminating repeated QML type and string-binding
+  errors without changing the rendered layout.
+
 ## [1.2.0] — 2026-08-18
 
 ### Added
@@ -1536,7 +1564,8 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.2...v1.0.3
