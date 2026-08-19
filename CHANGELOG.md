@@ -9,6 +9,33 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-08-18
+
+### Added
+
+- Added Nous Research subscription usage through its OAuth device flow and
+  OpenCode Go rolling, weekly, and monthly usage through its API key.
+
+### Fixed
+
+- Nous Research refreshes now send the refresh token in the form and the
+  required Portal header, work with existing safe configuration directories,
+  and use portable atomic credential replacement on Linux, macOS, and Windows.
+- Nous Research percentages now use subscription credits only. Purchased and
+  total usable credits remain separate balances instead of changing the plan
+  percentage.
+- OpenCode Go now rejects empty or unsupported usage responses and keeps live
+  and stale cache entries isolated by endpoint and API-key identity.
+
+### Security
+
+- Updated `h2` to 0.4.16 to bound empty DATA-frame processing
+  (`RUSTSEC-2026-0258`).
+- Nous browser launches no longer pass Portal URLs through the Windows command
+  shell, and OAuth traffic uses bounded requests with same-origin redirects.
+- OAuth fields and expiry arithmetic are bounded, and provider-specific error
+  classes are preserved without exposing credential-bearing response bodies.
+
 ## [1.1.0] — 2026-08-16
 
 ### Added
@@ -1509,7 +1536,8 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.1...v1.0.2
