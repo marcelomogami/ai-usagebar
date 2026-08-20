@@ -9,6 +9,15 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-08-19
+
+### Fixed
+
+- Omarchy remembers the exact provider or named account selected in the
+  Quattro panel and restores it after shell reloads, including sleep/unlock
+  cycles. If that entry is no longer available, the configured primary remains
+  the safe fallback.
+
 ## [1.3.0] — 2026-08-19
 
 ### Added
@@ -1564,7 +1573,8 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.0.3...v1.1.0
