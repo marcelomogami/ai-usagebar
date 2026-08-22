@@ -9,6 +9,22 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-08-21
+
+### Added
+
+- Omarchy can hide the selected provider's percentage or balance for an
+  icon-only top-bar entry while keeping full details in the panel and tooltip
+  (#104). The established right-click TUI shortcut is unchanged.
+
+### Fixed
+
+- Z.AI usage parsing accepts both `CREDIT_LIMIT` and the legacy
+  `TOKENS_LIMIT` bucket names, including mixed responses during rollout.
+- Google Antigravity now discovers its dynamically assigned local server on
+  Windows through native process and TCP-table APIs, so CLI, TUI, and JSON
+  consumers no longer need to update `ANTIGRAVITY_LS_ADDRESS` after restarts.
+
 ## [1.3.1] — 2026-08-19
 
 ### Fixed
@@ -1573,7 +1589,8 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.1.0...v1.2.0
