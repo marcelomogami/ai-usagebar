@@ -136,6 +136,24 @@ export function severityColor(severity, colors) {
     }
 }
 
+// The multi-provider panel puts usage beside elapsed time, so its colour is
+// most useful as a pacing comparison rather than as an absolute quota band.
+export function pacingSeverity(percent, elapsedPercent, fallbackSeverity) {
+    if (percent === null || percent === undefined
+        || elapsedPercent === null || elapsedPercent === undefined)
+        return severityOf(percent, fallbackSeverity);
+    const used = finitePercent(percent);
+    const elapsed = finitePercent(elapsedPercent);
+    if (used === null || elapsed === null)
+        return severityOf(percent, fallbackSeverity);
+    const pointsAhead = used - elapsed;
+    if (pointsAhead <= 0)
+        return 'low';
+    if (pointsAhead <= 5)
+        return 'mid';
+    return 'critical';
+}
+
 function normalizeSection(raw) {
     const type = String(raw && raw.type || '');
     if (type === 'spacer')

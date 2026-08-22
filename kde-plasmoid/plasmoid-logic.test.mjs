@@ -8,7 +8,7 @@ import {
     buildArgv, buildCommand, buildTuiCommand, DEFAULT_BINARY, DEFAULT_TIMEOUT_SECS,
     detailRows, displayedEntries, entryFor, errorMessage, EXIT_KILLED, EXIT_TIMED_OUT, formatDuration,
     headline, isAlarming, MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS,
-    metricDetail, metricForWindow, nextVendor, paletteFromTheme, panelCells, parseReport,
+    metricDetail, metricForWindow, nextVendor, pacingSeverity, paletteFromTheme, panelCells, parseReport,
     resetRemainingMs, safeText, severityColor, severityOf, SEVERITIES, shellQuote,
     shortLabel, shouldStartFetch, TIMEOUT_KILL_GRACE_SECS, timeoutSeconds,
     updatedAgeMs, vendorTabs,
@@ -123,6 +123,8 @@ assert.match(multiCompactQml, /entry\.id\s*===\s*"openai"[\s\S]*?return\s*\["7d"
     'the Codex compact block must start directly at the 7d window');
 assert.match(multiCompactQml, /elapsedPercent/,
     'the compact representation must keep pacing visible');
+assert.match(multiCompactQml, /Logic\.pacingSeverity\(/,
+    'the compact usage colour must compare usage with pacing');
 assert.match(multiCompactQml, /view-refresh-symbolic/,
     'the compact representation must keep the reset icon visible');
 assert.match(multiCompactQml, /\.\.\/icons\/claude\.svg/,
@@ -221,6 +223,19 @@ const NOW = Date.parse('2026-01-01T00:30:00Z');
 assert.equal(report.ok, true);
 assert.equal(report.entries.length, 3);
 assert.equal(report.primary, 'openai');
+
+// Compact multi-provider colours compare quota use with elapsed time. Being
+// exactly on pace is green, up to five points ahead is yellow, and anything
+// further ahead is red. Missing pacing retains the backend's absolute band.
+for (const [used, elapsed, expected] of [
+    [20, 30, 'low'],
+    [30, 30, 'low'],
+    [31, 30, 'mid'],
+    [35, 30, 'mid'],
+    [36, 30, 'critical'],
+])
+    assert.equal(pacingSeverity(used, elapsed, 'high'), expected);
+assert.equal(pacingSeverity(80, null, 'high'), 'high');
 
 // The binary always exits 0 and prints a report, so anything unparseable is a
 // missing or broken binary — never a vendor-side failure.
