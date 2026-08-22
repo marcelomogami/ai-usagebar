@@ -132,7 +132,10 @@ MouseArea {
                             text: metric.row && metric.row.percent !== null
                                 ? metric.row.percent + "%" : "—"
                             color: metric.row
-                                ? (Logic.severityColor(metric.row.severity, root.applet.colors)
+                                ? (Logic.severityColor(Logic.pacingSeverity(
+                                    metric.row.percent,
+                                    metric.row.elapsedPercent,
+                                    metric.row.severity), root.applet.colors)
                                     ?? Kirigami.Theme.textColor)
                                 : Kirigami.Theme.textColor
                             font.bold: true
