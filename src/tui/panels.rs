@@ -19,7 +19,7 @@ use ratatui_bubbletea_components::{Progress, Spinner, SpinnerFrames};
 use ratatui_bubbletea_theme::BubbleTheme;
 
 use crate::countdown;
-use crate::format::local_time_hms;
+use crate::format::{local_time_hms, money, usd};
 use crate::pacing::{self, PaceSeverity};
 use crate::pango::severity_for;
 use crate::theme::Theme;
@@ -143,26 +143,19 @@ pub fn compact_cells(
         severity: severity_for(p),
         utilization_pct: Some(p.clamp(0, 100)),
     };
-    let money = |v: f64| CompactCell {
+    let usd_cell = |v: f64| CompactCell {
         label: None,
-        value: format!("${v:.2}"),
+        value: usd(v),
         detail: None,
         severity: PaceSeverity::Low,
         utilization_pct: None,
     };
-    let ccy = |v: f64, c: &str| {
-        let s = match c {
-            "USD" => format!("${v:.2}"),
-            "CNY" => format!("¥{v:.2}"),
-            _ => format!("{v:.2} {c}"),
-        };
-        CompactCell {
-            label: None,
-            value: s,
-            detail: None,
-            severity: PaceSeverity::Low,
-            utilization_pct: None,
-        }
+    let money_cell = |v: f64, c: &str| CompactCell {
+        label: None,
+        value: money(v, c),
+        detail: None,
+        severity: PaceSeverity::Low,
+        utilization_pct: None,
     };
     let format_win = |label: &str, window: Option<&crate::usage::UsageWindow>, is_weekly: bool| {
         let Some(w) = window else {
@@ -226,7 +219,7 @@ pub fn compact_cells(
                 Some(p) => pct("spend", p),
                 None => CompactCell {
                     label: None,
-                    value: format!("${:.2}/mo", s.spent),
+                    value: format!("{}/mo", usd(s.spent)),
                     detail: None,
                     severity: PaceSeverity::Low,
                     utilization_pct: None,
@@ -276,16 +269,16 @@ pub fn compact_cells(
             }
             (s.plan.clone(), cells)
         }
-        VendorSnapshot::Openrouter(s) => (String::new(), vec![money(s.balance())]),
-        VendorSnapshot::Deepseek(s) => (String::new(), vec![ccy(s.balance, &s.currency)]),
+        VendorSnapshot::Openrouter(s) => (String::new(), vec![usd_cell(s.balance())]),
+        VendorSnapshot::Deepseek(s) => (String::new(), vec![money_cell(s.balance, &s.currency)]),
         VendorSnapshot::Kimi(s) => (
             s.plan.clone().unwrap_or_default(),
             vec![pct("wk", s.weekly_pct()), pct("5h", s.window_pct())],
         ),
-        VendorSnapshot::Kilo(s) => (String::new(), vec![money(s.balance)]),
-        VendorSnapshot::Novita(s) => (String::new(), vec![money(s.available)]),
-        VendorSnapshot::Moonshot(s) => (String::new(), vec![ccy(s.available, &s.currency)]),
-        VendorSnapshot::Grok(s) => (String::new(), vec![money(s.balance)]),
+        VendorSnapshot::Kilo(s) => (String::new(), vec![usd_cell(s.balance)]),
+        VendorSnapshot::Novita(s) => (String::new(), vec![usd_cell(s.available)]),
+        VendorSnapshot::Moonshot(s) => (String::new(), vec![money_cell(s.available, &s.currency)]),
+        VendorSnapshot::Grok(s) => (String::new(), vec![usd_cell(s.balance)]),
         VendorSnapshot::SuperGrok(s) => (s.plan.clone(), vec![pct(s.period.short(), s.weekly_pct)]),
         VendorSnapshot::Antigravity(s) => (
             s.plan.clone(),
@@ -579,7 +572,7 @@ fn anthropic_api_sections(s: &crate::usage::AnthropicApiSnapshot) -> SectionBuil
                     label: "Spend (mo)".into(),
                     pct: p,
                     severity: severity_for(pct),
-                    value_label: format!("${:.2} of ${:.0}", s.spent, limit),
+                    value_label: format!("{} of ${:.0}", usd(s.spent), limit),
                     footnote: format!("{pct}% of monthly limit"),
                 },
                 None,
@@ -588,7 +581,7 @@ fn anthropic_api_sections(s: &crate::usage::AnthropicApiSnapshot) -> SectionBuil
         _ => {
             v.push(Section::Text {
                 label: "Spend (mo)".into(),
-                value: format!("${:.2}", s.spent),
+                value: usd(s.spent),
             });
         }
     }
@@ -742,11 +735,15 @@ fn openrouter_sections(s: &crate::usage::OpenRouterSnapshot) -> SectionBuilder {
         Section::Metric {
             label: "Credit balance".into(),
             pct,
-            severity: severity_for(pct as i32),
-            value_label: format!("${:.2}", s.balance()),
+            // One severity policy for every frontend: this value is what the
+            // Omarchy, GNOME and KDE panels colour their row with, so it has to
+            // agree with the Waybar tooltip about what "in debt" looks like.
+            severity: crate::openrouter::vendor::severity(s),
+            value_label: usd(s.balance()),
             footnote: format!(
-                "${:.2} of ${:.2} used ({pct}%)",
-                s.total_usage, s.total_credits
+                "{} of {} used ({pct}%)",
+                usd(s.total_usage),
+                usd(s.total_credits)
             ),
         },
         None,
@@ -763,7 +760,7 @@ fn openrouter_sections(s: &crate::usage::OpenRouterSnapshot) -> SectionBuilder {
         v.push(Section::Spacer);
         v.push(Section::Block {
             label: "Per-key limit".into(),
-            body: vec![format!("${:.2} of ${:.2} remaining", rem, limit)],
+            body: vec![format!("{} of {} remaining", usd(rem), usd(limit))],
         });
     }
     v.push(Section::Spacer);
@@ -1007,7 +1004,7 @@ fn kilo_sections(s: &crate::usage::KiloSnapshot) -> SectionBuilder {
         Section::Spacer,
         Section::Text {
             label: "Balance".into(),
-            value: format!("${:.2}", s.balance),
+            value: usd(s.balance),
         },
     ])
 }
@@ -1021,7 +1018,7 @@ fn novita_sections(s: &crate::usage::NovitaSnapshot) -> SectionBuilder {
         Section::Spacer,
         Section::Text {
             label: "Balance".into(),
-            value: format!("${:.2}", s.available),
+            value: usd(s.available),
         },
         Section::Block {
             label: "Breakdown".into(),
@@ -1035,7 +1032,7 @@ fn novita_sections(s: &crate::usage::NovitaSnapshot) -> SectionBuilder {
         v.push(Section::Spacer);
         v.push(Section::Block {
             label: "Owed".into(),
-            body: vec![format!("${:.2}", s.outstanding)],
+            body: vec![usd(s.outstanding)],
         });
     }
     v
@@ -1043,11 +1040,7 @@ fn novita_sections(s: &crate::usage::NovitaSnapshot) -> SectionBuilder {
 
 fn moonshot_sections(s: &crate::usage::MoonshotSnapshot) -> SectionBuilder {
     let cur = &s.currency;
-    let fmt = |v: f64| match cur.as_str() {
-        "USD" => format!("${v:.2}"),
-        "CNY" => format!("¥{v:.2}"),
-        _ => format!("{v:.2} {cur}"),
-    };
+    let fmt = |v: f64| money(v, cur);
     SectionBuilder::new(vec![
         Section::Title {
             left: "Kimi (Moonshot)".into(),
@@ -1074,7 +1067,7 @@ fn grok_sections(s: &crate::usage::GrokSnapshot) -> SectionBuilder {
         Section::Spacer,
         Section::Text {
             label: "Prepaid balance".into(),
-            value: format!("${:.2}", s.balance),
+            value: usd(s.balance),
         },
     ])
 }
@@ -1107,7 +1100,7 @@ fn supergrok_sections(s: &crate::usage::SuperGrokSnapshot, now: DateTime<Utc>) -
         v.push(Section::Spacer);
         v.push(Section::Text {
             label: "Prepaid API".into(),
-            value: format!("${bal:.2}"),
+            value: usd(bal),
         });
     }
     v
@@ -1115,11 +1108,7 @@ fn supergrok_sections(s: &crate::usage::SuperGrokSnapshot, now: DateTime<Utc>) -
 
 fn deepseek_sections(s: &crate::usage::DeepseekSnapshot) -> SectionBuilder {
     let currency = &s.currency;
-    let fmt = |v: f64| match currency.as_str() {
-        "USD" => format!("${v:.2}"),
-        "CNY" => format!("¥{v:.2}"),
-        _ => format!("{v:.2} {currency}"),
-    };
+    let fmt = |v: f64| money(v, currency);
     let avail = if s.is_available {
         "available"
     } else {
@@ -1607,6 +1596,45 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, Section::Block { label, .. } if label == "Usage by period"))
         );
+    }
+
+    /// #118 reached every frontend, not just Waybar: the panel row is what the
+    /// Omarchy, GNOME and KDE plugins colour and label from, so the debt has to
+    /// survive the projection with its sign and its severity intact.
+    #[test]
+    fn openrouter_debt_reaches_the_panel_row_red_and_signed() {
+        let snap = OpenRouterSnapshot {
+            label: "OR".into(),
+            total_credits: 0.0,
+            total_usage: 5.71,
+            usage_daily: 1.0,
+            usage_weekly: 5.0,
+            usage_monthly: 5.71,
+            is_free_tier: false,
+            limit: None,
+            limit_remaining: None,
+        };
+        let sections = sections_for(&ready(VendorSnapshot::Openrouter(snap.clone())), now(), 5);
+        let metric = sections
+            .iter()
+            .find_map(|s| match s {
+                Section::Metric {
+                    label,
+                    value_label,
+                    severity,
+                    footnote,
+                    ..
+                } if label == "Credit balance" => Some((value_label, severity, footnote)),
+                _ => None,
+            })
+            .expect("no credit balance metric");
+        assert_eq!(metric.0, "-$5.71");
+        assert_eq!(*metric.1, PaceSeverity::Critical);
+        assert_eq!(metric.2, "$5.71 of $0.00 used (0%)");
+
+        // ...and the same number in the dense Overview list.
+        let (_, cells) = compact_cells(&VendorSnapshot::Openrouter(snap), now(), false, 5);
+        assert_eq!(cells[0].value, "-$5.71");
     }
 
     #[test]
