@@ -9,6 +9,43 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-08-25
+
+### Added
+
+- First-party Nix flake packaging supports `nix run`, profile installation,
+  direct NixOS and Home Manager consumption, an overlay, and a development
+  shell on x86_64 and aarch64 Linux and macOS.
+
+### Fixed
+
+- A `401`/`403` response body no longer reaches the widget tooltip or the TUI on
+  the run that hit it. The body was redacted on its way to the `.last_error`
+  file but the copy handed to the outcome was built separately from the raw
+  body, so signing out with a warm cache showed the body once and the neutral
+  message on every run after. `Cache::write_last_error` now returns exactly what
+  it persisted, and every vendor that built the pair itself passes that value on
+  — Anthropic, Anthropic API, Antigravity, Deepseek, Grok, Kilo, MiniMax,
+  Moonshot, Novita, OpenAI, OpenRouter and Z.ai. Cursor, Kimi and Kiro already
+  redacted at this point and are unchanged.
+- Antigravity no longer reports a TLS listener's `400 Client sent an HTTP
+  request to an HTTPS server` as the reason a probe run failed. Each product
+  binds an RPC port and an HTTPS port, and the probe order reaches the HTTPS
+  one only after the RPC one has already answered, so that reply describes our
+  own probe rather than the product. Because it is an `Http` and not a
+  `Transport`, letting it stand as the last failure also cost the silent cache
+  fallback that a not-yet-serving product is supposed to get. It is now ranked
+  below every other failure, and still reported when nothing else answered.
+
+## [1.5.2] — 2026-08-24
+
+### Fixed
+
+- Terminal escape sequences in a subprocess's stderr, or in a filesystem path,
+  can no longer repaint or forge a line in output the user is reading (#122).
+  `security` and `tar` diagnostics, `AppError::Io`'s path, the Cursor database
+  diagnostics, and the notes printed by `account switch` are all sanitized now.
+
 ## [1.5.1] — 2026-08-23
 
 ### Fixed
@@ -1635,7 +1672,9 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.5.2...v1.6.0
+[1.5.2]: https://github.com/akitaonrails/ai-usagebar/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.3.1...v1.4.0
