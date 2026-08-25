@@ -119,8 +119,9 @@ assert.match(multiCompactQml, /text:\s*root\.resetText\([\s\S]*?opacity:\s*0\.7/
     'reset timestamps must be visually subordinate');
 assert.match(multiCompactQml, /\["5h",\s*"7d"\]/,
     'the Claude compact block must keep both 5h and 7d windows');
-assert.match(multiCompactQml, /entry\.id\s*===\s*"openai"[\s\S]*?return\s*\["7d"\]/,
-    'the Codex compact block must start directly at the 7d window');
+assert.match(multiCompactQml,
+    /entry\.id\s*===\s*"openai"[\s\S]*?return\s*\["5h",\s*"7d"\]/,
+    'the Codex compact block must show both restored usage windows');
 assert.match(multiCompactQml, /elapsedPercent/,
     'the compact representation must keep pacing visible');
 assert.match(multiCompactQml, /Logic\.pacingSeverity\(/,
@@ -205,6 +206,9 @@ const RAW = JSON.stringify({
             status: 'ready', stale: true, error: null,
             fetched_at: '2026-01-01T00:00:00Z',
             sections: [
+                {type: 'metric', label: 'Codex 5h', value: '5%', percent: 5,
+                    elapsed_percent: 32, severity: 'low',
+                    reset_at: '2026-01-01T02:00:00Z', detail: '32% elapsed'},
                 {type: 'metric', label: 'Codex weekly', value: '68%', percent: 68,
                     elapsed_percent: 40, severity: 'mid',
                     reset_at: '2026-01-04T00:00:00Z', detail: '40% elapsed'},
@@ -340,10 +344,10 @@ assert.equal(isAlarming(null), false);
 // double it.
 assert.equal(detailRows(anthropic).length, 2);
 assert.deepEqual(detailRows(anthropic).map(r => r.type), ['metric', 'metric']);
-assert.deepEqual(detailRows(openai).map(r => r.type), ['metric', 'block']);
+assert.deepEqual(detailRows(openai).map(r => r.type), ['metric', 'metric', 'block']);
 assert.deepEqual(detailRows(null), []);
 // A block section keeps its free-form lines rather than being flattened away.
-assert.deepEqual(detailRows(openai)[1].body, ['balance: $4.10']);
+assert.deepEqual(detailRows(openai)[2].body, ['balance: $4.10']);
 
 assert.deepEqual(displayedEntries(report, ['anthropic', 'openai']).map(e => e.id),
     ['anthropic', 'openai']);
@@ -357,7 +361,8 @@ assert.deepEqual(displayedEntries(report, {0: 'openai', 1: 'anthropic', length: 
 assert.equal(metricForWindow(anthropic, '5h').percent, 62);
 assert.equal(metricForWindow(anthropic, '5h').elapsedPercent, 40);
 assert.equal(metricForWindow(anthropic, '7d').percent, 91);
-assert.equal(metricForWindow(openai, '5h'), null);
+assert.equal(metricForWindow(openai, '5h').percent, 5);
+assert.equal(metricForWindow(openai, '5h').elapsedPercent, 32);
 assert.equal(metricForWindow(openai, '7d').percent, 68);
 assert.equal(metricForWindow(zai, '7d'), null);
 
@@ -369,7 +374,8 @@ assert.equal(panelCells(anthropic, {max: 2})[1].severity, 'critical');
 // confident 0%.
 assert.deepEqual(panelCells(zai).map(c => c.text), ['⚠']);
 assert.deepEqual(panelCells(null), []);
-assert.deepEqual(panelCells(openai).map(c => c.text), ['68%']);
+assert.deepEqual(panelCells(openai).map(c => c.text), ['5%', '68%']);
+assert.deepEqual(panelCells(openai).map(c => c.label), ['5h', '7d']);
 
 assert.equal(shortLabel('Session (5h)'), '5h');
 assert.equal(shortLabel('Weekly (7d)'), '7d');
