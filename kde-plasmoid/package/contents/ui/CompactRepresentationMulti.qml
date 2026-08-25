@@ -36,7 +36,7 @@ MouseArea {
         if (entry.id === "anthropic" || entry.id.indexOf("anthropic@") === 0)
             return ["5h", "7d"];
         if (entry.id === "openai")
-            return ["7d"];
+            return ["5h", "7d"];
         return entry.sections
             .filter(section => section.type === "metric")
             .slice(0, 2)
