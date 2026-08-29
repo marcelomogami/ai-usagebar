@@ -36,6 +36,7 @@ pub(crate) const VENDOR_SECRET_ENV_VARS: &[&str] = &[
     "XAI_API_KEY",
     "GROK_API_KEY",
     "OPENCODE_GO_API_KEY",
+    "COMMANDCODE_API_KEY",
 ];
 
 pub(crate) fn vendor_secret_env_vars_to_remove(keep: &[&str]) -> Vec<&'static str> {
@@ -128,6 +129,8 @@ pub enum VendorId {
     NousResearch,
     #[serde(rename = "opencode-go")]
     OpenCodeGo,
+    #[serde(rename = "commandcode")]
+    CommandCode,
 }
 
 impl VendorId {
@@ -151,6 +154,7 @@ impl VendorId {
             VendorId::Kiro => "kiro",
             VendorId::NousResearch => "nous",
             VendorId::OpenCodeGo => "opencode-go",
+            VendorId::CommandCode => "commandcode",
         }
     }
 
@@ -177,6 +181,7 @@ impl VendorId {
             VendorId::Kiro => "Kiro",
             VendorId::NousResearch => "Nous Research",
             VendorId::OpenCodeGo => "OpenCode Go",
+            VendorId::CommandCode => "Command Code",
         }
     }
 
@@ -204,6 +209,7 @@ impl VendorId {
             VendorId::Kiro => "kir",
             VendorId::NousResearch => "nrs",
             VendorId::OpenCodeGo => "ocg",
+            VendorId::CommandCode => "cmc",
         }
     }
 
@@ -227,19 +233,16 @@ impl VendorId {
             VendorId::Kiro,
             VendorId::NousResearch,
             VendorId::OpenCodeGo,
+            VendorId::CommandCode,
         ]
     }
 }
 
-/// What a vendor returns from a successful fetch — snapshot + meta. Mirrors
-/// `anthropic::fetch::FetchOutcome` but vendor-agnostic.
-#[derive(Debug, Clone)]
-pub struct VendorOutcome {
-    pub snapshot: VendorSnapshot,
-    pub stale: bool,
-    pub last_error: Option<(u16, String)>,
-    pub cache_age: Option<std::time::Duration>,
-}
+/// What a vendor returns from a successful fetch — the same
+/// [`Outcome`](crate::outcome::Outcome) every vendor produces, once its own
+/// snapshot type has been widened to [`VendorSnapshot`]. Each vendor gets
+/// there with a single `outcome.map(VendorSnapshot::Whichever)`.
+pub type VendorOutcome = crate::outcome::Outcome<VendorSnapshot>;
 
 /// Options forwarded to renderers from the CLI.
 #[derive(Debug, Clone)]

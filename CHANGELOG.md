@@ -9,6 +9,62 @@ Each release is also published at
 
 ## [Unreleased]
 
+### Changed
+
+- Internal: `account.rs` grew from 7 tests to 22 by splitting its decisions
+  from its prompting and printing (#137) — the deletion-conflict authorization,
+  the keep-list parser, and the status and switch-plan renderers are now pure
+  functions with coverage. No behaviour changes; the extracted code is the code
+  that was there. Regions covered went 22% → 50%, whole-tree 83.9% → 85.1%.
+- Internal: the four-field record every vendor fetch returns, and the policy
+  around it, is now `outcome::Outcome<T>` instead of eighteen private copies
+  (#136). No behaviour changes — the copies had already been reconciled in
+  1.9.0 — but the reconciliation is now structural rather than repeated, and a
+  guard test forbids a second reader of the stale payload. Net −508 lines.
+
+## [1.9.0] — 2026-08-28
+
+### Added
+
+- **Command Code** (`commandcode.ai`) is supported as a vendor, selectable with
+  `--vendor commandcode` and enabled with `[commandcode]` in config. It shows
+  the 5-hour and weekly rolling spend windows — priced in dollars, as Command
+  Code meters spend rather than tokens — plus the plan and the monthly credit
+  remaining. Like Cursor and Kiro CLI it needs no key of its own: it reuses the
+  OAuth credential from either the official CLI or pi
+  (`~/.commandcode/auth.json`, then `~/.pi/agent/auth.json`), with
+  `COMMANDCODE_API_KEY` as an override. The credential is only ever read —
+  refreshing it belongs to the CLI that owns the file — so an expired token is
+  reported as expired rather than silently rewritten.
+
+### Changed
+
+- EUR, GBP, BRL and JPY amounts render with their symbol everywhere. The two
+  money formatters — one for decimal amounts, one for integer minor units —
+  each carried their own currency table, and they disagreed: the same euro
+  figure read `3.50 EUR` in one panel and `€3.50` in another. Both now share a
+  single table. USD and CNY are unchanged, and a currency with no symbol still
+  trails its code rather than guessing one.
+
+### Fixed
+
+- A vendor whose cache is cold now reports **what actually failed** instead of
+  a generic "no usable cache". Claude, Codex, Z.AI, OpenRouter and DeepSeek
+  replaced the original error with that message when there was no cached
+  figure to fall back on, so on a first run an expired key, a `500` and a
+  genuinely empty cache all rendered identically — the useful diagnostic was
+  written to disk and shown only on the *next* refresh. The other thirteen
+  vendors already returned the original error; a guard test keeps the two
+  groups from diverging again.
+- Z.AI's rows in the native panels — Omarchy Quattro, GNOME, KDE and the TUI —
+  carry the pace footnote every other percentage vendor's rows carry
+  (`60% elapsed · 20pts under`) instead of a bare `Resets in 2h 00m`. GLM's
+  session, weekly and monthly MCP windows each report a duration and a reset,
+  so all three pace, off the same `pacing::calc` the `{zai_*_pace}`
+  placeholders already use. Each surface keeps its own way of showing it, so
+  nothing else moves: the arrow stays the widget's, the bar tick the macOS
+  menu bar's, the footnote the panels'.
+
 ## [1.8.0] — 2026-08-28
 
 ### Added
@@ -1782,7 +1838,8 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.5.2...v1.6.0

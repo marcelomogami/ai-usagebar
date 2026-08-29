@@ -312,6 +312,16 @@ pub fn compact_cells(
                 });
             (s.plan.clone().unwrap_or_default(), vec![cell])
         }
+        VendorSnapshot::CommandCode(s) => {
+            let cells = [
+                ("session", s.five_hour.as_ref()),
+                ("weekly", s.weekly.as_ref()),
+            ]
+            .into_iter()
+            .filter_map(|(label, window)| window.map(|window| pct(label, window.pct())))
+            .collect();
+            (s.plan.clone().unwrap_or_default(), cells)
+        }
         VendorSnapshot::OpenCodeGo(s) => {
             let cells = [
                 ("rolling", s.rolling.as_ref()),
@@ -379,6 +389,10 @@ pub fn headline_pct(snapshot: &VendorSnapshot) -> Option<i32> {
         VendorSnapshot::NousResearch(s) => s
             .usage_percent()
             .map(|value| value.round().clamp(0.0, 100.0) as i32),
+        VendorSnapshot::CommandCode(s) => {
+            let worst = s.worst_pct();
+            (s.five_hour.is_some() || s.weekly.is_some()).then_some(worst)
+        }
         VendorSnapshot::OpenCodeGo(s) => [
             s.rolling
                 .as_ref()
@@ -445,7 +459,7 @@ pub(crate) fn sections_with_metadata_for(
                 VendorSnapshot::Anthropic(s) => anthropic_sections(s, now, pace_tolerance),
                 VendorSnapshot::AnthropicApi(s) => anthropic_api_sections(s),
                 VendorSnapshot::Openai(s) => openai_sections(s, now, pace_tolerance),
-                VendorSnapshot::Zai(s) => zai_sections(s, now),
+                VendorSnapshot::Zai(s) => zai_sections(s, now, pace_tolerance),
                 VendorSnapshot::Openrouter(s) => openrouter_sections(s),
                 VendorSnapshot::Deepseek(s) => deepseek_sections(s),
                 VendorSnapshot::Kimi(s) => kimi_sections(s, now, pace_tolerance),
@@ -460,6 +474,7 @@ pub(crate) fn sections_with_metadata_for(
                 VendorSnapshot::Kiro(s) => kiro_sections(s, now),
                 VendorSnapshot::NousResearch(s) => nous_sections(s, now),
                 VendorSnapshot::OpenCodeGo(s) => opencode_go_sections(s, now),
+                VendorSnapshot::CommandCode(s) => commandcode_sections(s, now),
             };
             // Inject the (already-absolute) fetched-at instant into the title
             // row, right-aligned. Pre-snapshotted in app::refresh_one so it
@@ -700,19 +715,19 @@ fn openai_sections(
     v
 }
 
-fn zai_sections(s: &crate::usage::ZaiSnapshot, now: DateTime<Utc>) -> SectionBuilder {
+fn zai_sections(s: &crate::usage::ZaiSnapshot, now: DateTime<Utc>, tol: u32) -> SectionBuilder {
     let mut v = SectionBuilder::new(vec![Section::Title {
         left: s.plan.clone(),
         right: None,
     }]);
     if let Some(w) = &s.session {
-        push_window(&mut v, "Session (5h)", w, now, 5, false);
+        push_window(&mut v, "Session (5h)", w, now, tol, true);
     }
     if let Some(w) = &s.weekly {
-        push_window(&mut v, "Weekly", w, now, 5, false);
+        push_window(&mut v, "Weekly", w, now, tol, true);
     }
     if let Some(w) = &s.mcp {
-        push_window(&mut v, "MCP tools (monthly)", w, now, 5, false);
+        push_window(&mut v, "MCP tools (monthly)", w, now, tol, true);
     }
     if s.session.is_none() && s.weekly.is_none() && s.mcp.is_none() {
         v.push(Section::Spacer);
@@ -893,6 +908,58 @@ fn nous_sections(s: &crate::nous::types::AccountSnapshot, now: DateTime<Utc>) ->
         sections.push(Section::Text {
             label: "Renews".into(),
             value: countdown::format(Some(period_end), now),
+        });
+    }
+    sections
+}
+
+fn commandcode_sections(
+    s: &crate::commandcode::types::Snapshot,
+    now: DateTime<Utc>,
+) -> SectionBuilder {
+    let title = match s.plan.as_deref() {
+        Some(plan) if !plan.is_empty() => format!("Command Code {plan}"),
+        _ => "Command Code".to_string(),
+    };
+    let mut sections = SectionBuilder::new(vec![Section::Title {
+        left: title,
+        right: None,
+    }]);
+    for (label, window) in [
+        ("Session (5h)", s.five_hour.as_ref()),
+        ("Weekly", s.weekly.as_ref()),
+    ] {
+        if let Some(window) = window {
+            let pct = window.pct();
+            sections.push_metric(
+                Section::Metric {
+                    label: label.into(),
+                    pct: pct.clamp(0, 100) as u16,
+                    severity: severity_for(pct),
+                    value_label: format!("{pct}%"),
+                    footnote: format!("{} of {}", usd(window.used), usd(window.cap)),
+                },
+                window.resets_at,
+            );
+            sections.push(Section::Text {
+                label: "Resets".into(),
+                value: countdown::format(window.resets_at, now),
+            });
+        }
+    }
+    if let Some(credits) = s.credits.as_ref() {
+        sections.push(Section::Spacer);
+        let footnote = match (s.credits_spent(), s.credit_pool) {
+            (Some(spent), Some(pool)) => format!("{} of {} spent", usd(spent), usd(pool)),
+            _ => String::new(),
+        };
+        sections.push(Section::Text {
+            label: "Credits".into(),
+            value: if footnote.is_empty() {
+                usd(credits.remaining())
+            } else {
+                format!("{} · {footnote}", usd(credits.remaining()))
+            },
         });
     }
     sections
@@ -1641,6 +1708,42 @@ mod tests {
         // ...and the same number in the dense Overview list.
         let (_, cells) = compact_cells(&VendorSnapshot::Openrouter(snap), now(), false, 5);
         assert_eq!(cells[0].value, "-$5.71");
+    }
+
+    /// The panels express pace as a footnote on the row; the arrow is the
+    /// widget's idiom and the bar tick the menu bar's. All three Z.AI windows
+    /// report a duration and a reset, so all three carry one.
+    #[test]
+    fn zai_windows_are_paced_like_every_other_percentage_vendor() {
+        let window = |pct: i32, hours: i64, span: chrono::Duration| crate::usage::UsageWindow {
+            utilization_pct: pct,
+            resets_at: Some(now() + chrono::Duration::hours(hours)),
+            window_duration: span,
+        };
+        let snap = ZaiSnapshot {
+            plan: "GLM Coding Pro".into(),
+            session: Some(window(40, 2, chrono::Duration::hours(5))),
+            weekly: Some(window(60, 48, chrono::Duration::days(7))),
+            mcp: Some(window(10, 200, chrono::Duration::days(30))),
+        };
+
+        let footnotes: Vec<String> = sections_for(&ready(VendorSnapshot::Zai(snap)), now(), 5)
+            .into_iter()
+            .filter_map(|section| match section {
+                Section::Metric { footnote, .. } => Some(footnote),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(footnotes.len(), 3, "{footnotes:?}");
+        for footnote in &footnotes {
+            assert!(footnote.contains("% elapsed"), "{footnote}");
+        }
+        // 40% used with 60% of a 5h window gone: behind pace, not ahead.
+        assert_eq!(
+            footnotes[0], "Resets in 2h 00m · 60% elapsed · 20pts under",
+            "{footnotes:?}"
+        );
     }
 
     #[test]

@@ -160,6 +160,7 @@ async fn build_output(cli: &Cli) -> Result<WaybarOutput> {
         Vendor::Kiro => kiro_output(cli, &config).await,
         Vendor::NousResearch => nous_output(cli).await,
         Vendor::OpenCodeGo => opencode_go_output(cli, &config).await,
+        Vendor::CommandCode => commandcode_output(cli, &config).await,
     }
 }
 
@@ -193,12 +194,9 @@ async fn nous_output(cli: &Cli) -> Result<WaybarOutput> {
         crate::nous::fetch::fetch_account_with_refresh(&client, &store, &endpoints, Utc::now())
             .await?;
     let snapshot = account.clone();
-    let outcome = VendorOutcome {
-        snapshot: crate::usage::VendorSnapshot::NousResearch(account),
-        stale: false,
-        last_error: None,
-        cache_age: Some(Duration::ZERO),
-    };
+    // Nous keeps no cache of its own, so every read is a live one.
+    let outcome =
+        crate::outcome::Outcome::fresh(crate::usage::VendorSnapshot::NousResearch(account));
     let theme = theme_from_cli(cli);
     Ok(crate::nous::vendor::render(
         &outcome,
@@ -236,6 +234,40 @@ async fn opencode_go_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> 
     let snapshot = outcome.snapshot.clone();
     let vendor_outcome: VendorOutcome = outcome.into();
     Ok(crate::opencode_go::vendor::render(
+        &vendor_outcome,
+        &snapshot,
+        &theme_from_cli(cli),
+        &RenderOpts::from_cli(cli),
+        Utc::now(),
+    ))
+}
+
+/// Command Code has no API key of its own: it reuses the OAuth credential a
+/// local agent harness already holds, so there is nothing to resolve from
+/// config beyond an optional override of where to look.
+async fn commandcode_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> {
+    let credential = crate::commandcode::creds::resolve(config.commandcode.auth_paths.as_deref())?;
+    let client = http_client()?;
+    let cache = vendor_cache(cli, "commandcode")?;
+    let endpoints = crate::commandcode::fetch::Endpoints::default();
+    let outcome = match crate::commandcode::fetch::fetch_snapshot(
+        &client,
+        &credential.token,
+        &cache,
+        &endpoints,
+        DEFAULT_TTL,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) if error.is_transient() => {
+            return Ok(WaybarOutput::loading(cli.icon.as_deref()));
+        }
+        Err(error) => return Err(error),
+    };
+    let snapshot = outcome.snapshot.clone();
+    let vendor_outcome: VendorOutcome = outcome.into();
+    Ok(crate::commandcode::vendor::render(
         &vendor_outcome,
         &snapshot,
         &theme_from_cli(cli),
@@ -906,6 +938,8 @@ fn fallback(err: &AppError, _cli: &Cli) -> WaybarOutput {
     };
     // Tooltips are Pango markup. Escape error text before serializing it so an
     // error cannot inject markup; serde still produces valid one-line JSON.
+    // `escape` also runs `display::sanitize_untrusted_field`, which is what
+    // bounds and de-controls the vendor body this tooltip can carry.
     WaybarOutput::error(&escape(&tooltip))
 }
 
@@ -971,6 +1005,37 @@ mod tests {
         let out = fallback(&err, &cli_default());
         assert_eq!(out.text, "⚠");
         assert!(out.tooltip.contains("missing token"));
+    }
+
+    /// A vendor body reaches this tooltip verbatim on a cold cache — nothing
+    /// on the way has been through `Cache::write_last_error`. What protects it
+    /// is that `pango::escape` runs `sanitize_untrusted_field` first, so bidi
+    /// overrides (which reorder the text around them and survive XML escaping)
+    /// and a body up to the 2 MiB `MAX_BODY_BYTES` ceiling are both handled.
+    /// That is load-bearing and easy to lose if `escape` is ever reduced to
+    /// plain XML escaping, so pin it here at the sink that depends on it.
+    #[test]
+    fn fallback_strips_control_characters_and_caps_a_hostile_body() {
+        let hostile = "start\u{202E}reordered\u{1B}[31m".to_string()
+            + &"A".repeat(crate::display::MAX_UNTRUSTED_FIELD_CHARS);
+        let out = fallback(
+            &AppError::Http {
+                status: 500,
+                body: hostile,
+            },
+            &cli_default(),
+        );
+
+        assert_eq!(out.text, "\u{26a0}");
+        assert!(!out.tooltip.contains('\u{202E}'), "bidi override survived");
+        assert!(!out.tooltip.contains('\u{1B}'), "escape sequence survived");
+        assert!(
+            out.tooltip.chars().count() <= crate::display::MAX_UNTRUSTED_FIELD_CHARS,
+            "uncapped tooltip of {} chars",
+            out.tooltip.chars().count()
+        );
+        // The diagnostic itself still survives the cleaning.
+        assert!(out.tooltip.contains("HTTP 500"), "{}", out.tooltip);
     }
 
     #[test]

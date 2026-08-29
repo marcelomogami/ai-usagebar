@@ -15,6 +15,7 @@ pub mod anthropic_api;
 pub mod antigravity;
 pub mod cache;
 pub mod claude_desktop;
+pub mod commandcode;
 pub mod config;
 pub mod context;
 pub mod countdown;
@@ -27,6 +28,7 @@ pub mod grok;
 /// Source-scanning helpers for structural guard tests. Test-only.
 #[cfg(test)]
 pub(crate) mod guard;
+pub mod jwt;
 pub mod kilo;
 pub mod kimi;
 pub mod kiro;
@@ -37,10 +39,12 @@ pub mod novita;
 pub mod openai;
 pub mod opencode_go;
 pub mod openrouter;
+pub mod outcome;
 pub mod pacing;
 pub mod pango;
 pub mod report;
 pub mod safe_storage;
+pub mod serde_helpers;
 pub mod supergrok;
 pub mod theme;
 pub mod tooltip;
