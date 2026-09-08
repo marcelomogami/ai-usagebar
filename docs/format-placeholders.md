@@ -10,15 +10,15 @@ metrics expand to an empty string unless noted otherwise.
 | Provider | Value | Provider | Value |
 |---|---:|---|---:|
 | Claude | `cld` | Codex | `gpt` |
-| Z.AI | `zai` | OpenRouter | `opr` |
-| DeepSeek | `dsk` | Kimi | `kmi` |
-| Kilo | `klo` | Novita | `nvt` |
-| Moonshot | `msh` | Grok | `grk` |
-| SuperGrok | `sgk` | Anthropic API | `aac` |
-| Antigravity | `agy` | Cursor | `cur` |
-| MiniMax | `mmx` | Kiro CLI | `kir` |
-| Nous Research | `nrs` | OpenCode Go | `ocg` |
-| Command Code | `cmc` | | |
+| GitHub Copilot | `ghc` | Z.AI | `zai` |
+| OpenRouter | `opr` | DeepSeek | `dsk` |
+| Kimi | `kmi` | Kilo | `klo` |
+| Novita | `nvt` | Moonshot | `msh` |
+| Grok | `grk` | SuperGrok | `sgk` |
+| Anthropic API | `aac` | Antigravity | `agy` |
+| Cursor | `cur` | MiniMax | `mmx` |
+| Kiro CLI | `kir` | Nous Research | `nrs` |
+| OpenCode Go | `ocg` | Command Code | `cmc` |
 
 The same codes ride the `ai-usagebar usage --json` report as each entry's
 `short_name`, so a native frontend can draw a Waybar-style provider tag without
@@ -32,8 +32,10 @@ has one pool, so it maps `kiro_pct` to both percentage slots.
 
 Claude and Codex also provide `*_elapsed`, `*_pace`, and `*_bar` families.
 Z.AI and MiniMax provide elapsed aliases plus provider-specific pace families.
-Antigravity provides elapsed values for all four windows plus
-`{session_model}`, `{weekly_model}`, `{scoped_model}`, and `{extra_model}`.
+Antigravity provides elapsed values plus `{session_model}`, `{weekly_model}`,
+`{scoped_model}`, and `{extra_model}` for whichever of its four windows the
+running product reports — a product that exposes only weekly buckets leaves the
+5-hour placeholders empty rather than reporting a figure it never received.
 Provider-specific families such as `{oai_*}`, `{zai_*}`, and `{or_*}` are empty
 for providers that do not define them.
 
@@ -60,10 +62,39 @@ window is absent, it returns neutral empty, `0`, or `—` values as appropriate.
 `{oai_session_elapsed}`, `{oai_session_pace}`,
 `{oai_session_pace_indicator}`, `{oai_weekly_*}`,
 `{oai_code_review_pct}`, `{oai_credit_balance}`, `{oai_local_msgs}`,
-`{oai_cloud_msgs}`
+`{oai_cloud_msgs}`, `{oai_resets_available}`, `{oai_resets}`
 
 Session and weekly families are empty when the API omits that window. The
 default widget automatically uses weekly values for a weekly-only response.
+
+`{oai_resets_available}` is the number of banked rate-limit reset credits —
+the ones Codex lets you redeem by hand, not the automatic window rollover in
+`{oai_session_reset}`. `{oai_resets}` is the compact count (`2 resets
+available`). The panel lists each credit on its own row with title and
+expiry. Accounts that have never earned one report `0`.
+
+- `{oai_extra_limits}` lists Codex's *named* limits with their worst window
+  (`GPT-5.3-Codex-Spark 34% · gpt-reserve 71%`), and is empty for an account
+  that has none. These sit beside the headline window and can be the binding
+  constraint while it still reads low.
+- `{oai_unavailable_models}` names models the account cannot dispatch to right
+  now, comma separated, and is empty when everything is reachable. This is what
+  "Selected model is at capacity" looks like in the data — no percentage
+  anywhere reflects it.
+
+## GitHub Copilot
+
+`{copilot_plan}`, `{copilot_reset}`, `{copilot_premium_pct}`,
+`{copilot_premium_used}`, `{copilot_premium_limit}`, `{copilot_chat_pct}`,
+`{copilot_chat_used}`, `{copilot_chat_limit}`, `{copilot_completions_pct}`,
+`{copilot_completions_used}`, `{copilot_completions_limit}`
+
+These represent the `premium_interactions`, `chat`, and `completions` quota
+snapshots that GitHub reports. The default bar format is
+`{copilot_premium_pct}% · {copilot_reset}`. `{session_*}` aliases Premium and
+`{weekly_*}` aliases Chat so one cross-provider format can still render it;
+both use Copilot's account-wide quota reset, not a weekly window. Missing
+quota buckets expand to `—`.
 
 ## Z.AI
 
@@ -118,8 +149,9 @@ currencies are present; otherwise they use CNY.
 
 These cover the subscription quota and rolling five-hour window from
 `api.kimi.com/coding/v1/usages`. The default format is
-`{kimi_weekly_pct}% · {kimi_weekly_reset}`. Generic aliases are `{plan}` for the
-plan, `{weekly_pct}` for weekly usage, and `{session_pct}` for the five-hour
+`5h {kimi_window_pct}% · 7d {kimi_weekly_pct}%`, shortest window first like
+every other two-window vendor. Generic aliases are `{plan}` for the plan,
+`{weekly_pct}` for weekly usage, and `{session_pct}` for the five-hour
 window.
 
 ## Kilo
@@ -144,18 +176,28 @@ USD; the China service uses CNY.
 
 ## SuperGrok
 
-`{sgk_plan}`, `{sgk_pct}`, `{sgk_reset}`, `{sgk_period}`, `{sgk_prepaid}`
+`{sgk_plan}`, `{sgk_pct}`, `{sgk_reset}`, `{sgk_period}`, `{sgk_prepaid}`,
+`{sgk_resets_available}`, `{sgk_resets}`
 
 - `{sgk_period}` is `Weekly`, `Monthly`, or `Current period`.
 - The default bar format is `{sgk_pct}% · {sgk_reset}`.
 - `{session_pct}` and `{weekly_pct}` remain aliases for `sgk_pct`.
 - `{plan}` is the subscription tier when Grok Build supplies one.
+- `{sgk_resets_available}` is the number of banked resets you can redeem by
+  hand, and `{sgk_resets}` the compact count (`1 reset available`). These are
+  unrelated to `{sgk_reset}`, which is the current period's automatic rollover.
 
-SuperGrok is the subscription path provided by Grok Build's `x.ai/billing` ACP
-extension. It is separate from the Grok Management API prepaid balance.
-ai-usagebar never parses, copies, caches, refreshes, or sends the SuperGrok
-token in ACP messages. It hashes auth and config files only to keep caches
-separate between logins.
+SuperGrok is the subscription path. It is separate from the Grok Management
+API prepaid balance. Billing comes from Grok Build's documented
+`cli-chat-proxy.grok.com` endpoint, with the CLI's `x.ai/billing` ACP extension
+as a fallback for builds where that endpoint is unavailable.
+
+The HTTPS path reads the `key` from the login's `auth.json` and uses it inside
+the outgoing `Authorization` headers of the billing request and, separately,
+the remaining-resets RPC. ai-usagebar never copies, caches, refreshes, logs,
+or writes that key back, and never echoes it in an error; account selection
+and token rotation stay with Grok Build. The config file is read only as
+opaque bytes for the one-way digest that keeps caches separate between logins.
 
 The default executable is `$GROK_HOME/bin/grok`, or `~/.grok/bin/grok` when
 `GROK_HOME` is unset. ai-usagebar does not search `PATH`. Set
@@ -214,3 +256,21 @@ through the documented AWS SSO OIDC `CreateToken` API and stores refreshed or
 rotated credentials in an account-scoped `kiro/oauth.json` file. That file is
 mode `0600` on Unix. kiro-cli's database is opened read-only and is never
 modified.
+
+## Command Code
+
+`{cc_plan}`, `{cc_session_pct}`, `{cc_session_reset}`, `{cc_session_used}`,
+`{cc_session_cap}`, `{cc_weekly_pct}`, `{cc_weekly_reset}`,
+`{cc_weekly_used}`, `{cc_weekly_cap}`, `{cc_monthly_pct}`,
+`{cc_monthly_reset}`, `{cc_monthly_used}`, `{cc_monthly_cap}`,
+`{cc_credits}`, `{cc_credits_pool}`, `{cc_credits_spent}`,
+`{cc_credits_reset}`
+
+The rolling windows are priced in dollars, so the `*_used` and `*_cap`
+placeholders expand to money rather than counts. The monthly family describes
+the plan's credit allowance as a window: `{cc_monthly_used}` is the spend
+derived from the credit ledger against the plan pool, and
+`{cc_monthly_reset}` is the subscription's billing period end, when the
+ledger refills. A plan the release does not know, or a response without the
+credit ledger, leaves the monthly family and `{cc_credits_reset}` at `—`.
+`{session_pct}` and `{weekly_pct}` alias the 5-hour and weekly windows.

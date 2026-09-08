@@ -1,17 +1,18 @@
 //! Settings overlay — opened from the TUI by pressing `s`. Lets the user pick
-//! the primary vendor and paste an API key for any key-authenticated vendor
+//! the primary vendor and paste a credential for any API-key-authenticated vendor
 //! (including Z.AI, Kimi, MiniMax, and the balance vendors) without hand-editing
-//! config.toml. Anthropic, OpenAI, Cursor, Kiro, Antigravity, and Command Code
-//! authenticate through local product state, so they have no key field here —
-//! there is nothing to paste, and a field would only imply otherwise. Kimi keeps
-//! its key field because a platform key is still one of its two credentials, but
+//! config.toml. Anthropic, OpenAI, GitHub Copilot, Cursor, Kiro, Antigravity, and
+//! Command Code authenticate through official or local product state, so they have
+//! no credential field here — there is nothing to paste, and a field would only
+//! imply otherwise. Kimi keeps
+//! its credential field because a platform key is still one of its two credentials, but
 //! a subscriber whose credential is the Kimi Code CLI login has nothing to paste
 //! and enables `[kimi]` in config.toml instead.
 //!
 //! Persistence uses `toml_edit` so the existing config keeps its comments,
 //! whitespace, and unrelated fields. Writing a key also flips that vendor's
 //! `enabled = true` (the opt-in vendors are disabled by default), so "paste the
-//! key and save" is all it takes. Files with inline keys are atomically written
+//! credential and save" is all it takes. Files with inline credentials are atomically written
 //! and `chmod 600`ed.
 
 use std::collections::BTreeMap;
@@ -27,20 +28,23 @@ use ratatui_bubbletea_theme::BubbleTheme;
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, value};
 
-use crate::config::Config;
+use crate::config::{Config, read_config_document, set_bool, write_config_document};
 use crate::error::{AppError, Result};
 use crate::theme::Theme;
 use crate::tui::style::bubble_theme;
 use crate::vendor::VendorId;
 
-/// A vendor that authenticates with an inline API key (vs. OAuth). The order of
-/// this table is the tab order of the key fields and the layout of the state's
-/// `keys` vec.
+/// A vendor that authenticates with an inline credential. The order of this
+/// table is the tab order of the credential fields and the layout of the
+/// state's `keys` vec.
 pub struct KeyVendor {
     pub id: VendorId,
     pub label: &'static str,
-    pub env: &'static str,
     pub section: &'static str,
+    /// Config field that stores the credential (`api_key` for most vendors).
+    pub config_key: &'static str,
+    /// Human-readable name shown in the native settings form.
+    pub secret_label: &'static str,
     /// Extra hint after the env var (e.g. "management key"). Empty for none.
     pub note: &'static str,
 }
@@ -49,100 +53,92 @@ pub const KEY_VENDORS: &[KeyVendor] = &[
     KeyVendor {
         id: VendorId::AnthropicApi,
         label: "Anthropic API",
-        env: "ANTHROPIC_ADMIN_KEY",
-        section: "anthropic_api",
+        section: VendorId::AnthropicApi.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "admin key — monthly spend",
     },
     KeyVendor {
         id: VendorId::Zai,
         label: "Z.AI",
-        env: "ZAI_API_KEY",
-        section: "zai",
+        section: VendorId::Zai.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "",
     },
     KeyVendor {
         id: VendorId::Openrouter,
         label: "OpenRouter",
-        env: "OPENROUTER_API_KEY",
-        section: "openrouter",
+        section: VendorId::Openrouter.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "",
     },
     KeyVendor {
         id: VendorId::Deepseek,
         label: "DeepSeek",
-        env: "DEEPSEEK_API_KEY",
-        section: "deepseek",
+        section: VendorId::Deepseek.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "",
     },
     KeyVendor {
         id: VendorId::Kimi,
         label: "Kimi",
-        env: "KIMI_API_KEY",
-        section: "kimi",
+        section: VendorId::Kimi.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "coding-plan usage",
     },
     KeyVendor {
         id: VendorId::Kilo,
         label: "Kilo",
-        env: "KILO_API_KEY",
-        section: "kilo",
+        section: VendorId::Kilo.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "",
     },
     KeyVendor {
         id: VendorId::Novita,
         label: "Novita",
-        env: "NOVITA_API_KEY",
-        section: "novita",
+        section: VendorId::Novita.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "",
     },
     KeyVendor {
         id: VendorId::Moonshot,
         label: "Moonshot",
-        env: "MOONSHOT_API_KEY",
-        section: "moonshot",
+        section: VendorId::Moonshot.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "account balance",
     },
     KeyVendor {
         id: VendorId::Grok,
         label: "Grok",
-        env: "XAI_MANAGEMENT_KEY",
-        section: "grok",
+        section: VendorId::Grok.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "management key, not the inference key",
     },
     KeyVendor {
         id: VendorId::Minimax,
         label: "MiniMax",
-        env: "MINIMAX_API_KEY",
-        section: "minimax",
+        section: VendorId::Minimax.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "Token Plan subscription key",
     },
     KeyVendor {
         id: VendorId::OpenCodeGo,
         label: "OpenCode Go",
-        env: "OPENCODE_GO_API_KEY",
-        section: "opencode-go",
+        section: VendorId::OpenCodeGo.config_section(),
+        config_key: "api_key",
+        secret_label: "API key",
         note: "usage quota",
     },
 ];
-
-/// Read the inline `api_key` currently in config for a given section, so the
-/// field opens pre-filled (masked) when one is already set.
-fn config_inline_key<'a>(cfg: &'a Config, section: &str) -> Option<&'a str> {
-    match section {
-        "anthropic_api" => cfg.anthropic_api.api_key.as_deref(),
-        "zai" => cfg.zai.api_key.as_deref(),
-        "openrouter" => cfg.openrouter.api_key.as_deref(),
-        "deepseek" => cfg.deepseek.api_key.as_deref(),
-        "kimi" => cfg.kimi.api_key.as_deref(),
-        "kilo" => cfg.kilo.api_key.as_deref(),
-        "novita" => cfg.novita.api_key.as_deref(),
-        "moonshot" => cfg.moonshot.api_key.as_deref(),
-        "grok" => cfg.grok.api_key.as_deref(),
-        "minimax" => cfg.minimax.api_key.as_deref(),
-        "opencode-go" => cfg.opencode_go.api_key.as_deref(),
-        _ => None,
-    }
-}
 
 /// Which control has keyboard focus. `Key(i)` indexes into [`KEY_VENDORS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,16 +279,25 @@ impl SettingsState {
     pub fn from_config(cfg: &Config) -> Self {
         let keys = KEY_VENDORS
             .iter()
-            .map(|kv| KeyInput::from_config(config_inline_key(cfg, kv.section)))
+            .map(|kv| KeyInput::from_config(cfg.inline_api_key(kv.id)))
             .collect();
-        let primary_choices = cfg.enabled_vendors();
+        let mut primary_choices = cfg.enabled_vendors();
+        // Copilot credentials belong to GitHub CLI, so a login cannot write a
+        // local key that would also opt it in. Offer it explicitly instead:
+        // selecting it persists both the primary and `enabled = true`.
+        if !primary_choices.contains(&VendorId::Copilot) {
+            primary_choices.push(VendorId::Copilot);
+        }
         // A configured but disabled primary is ineffective. Display the first
         // enabled vendor instead; when none are enabled retain the historical
         // Anthropic fallback in memory without inventing a persisted primary.
         let primary = cfg
             .ui
             .primary
-            .filter(|vendor| primary_choices.contains(vendor))
+            .filter(|vendor| {
+                primary_choices.contains(vendor)
+                    && (*vendor != VendorId::Copilot || cfg.copilot.enabled)
+            })
             .or_else(|| primary_choices.first().copied())
             .unwrap_or_else(|| cfg.ui.primary.unwrap_or(VendorId::Anthropic));
         Self {
@@ -458,90 +463,66 @@ fn save_to_config_default(state: &SettingsState) -> Result<()> {
 }
 
 /// Same as `save_to_config_default` but with an explicit path — exposed for
-/// tests. Writing a non-empty key also sets that vendor's `enabled = true`.
+/// tests. Writing a non-empty credential also sets that vendor's `enabled = true`.
 pub fn save_to_path(state: &SettingsState, path: &Path) -> Result<()> {
-    let original = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(AppError::io_at(path, error)),
-    };
-    let mut doc: DocumentMut = if original.trim().is_empty() {
-        DocumentMut::new()
-    } else {
-        original.parse().map_err(|e: toml_edit::TomlError| {
-            AppError::Other(format!("config.toml not parseable: {e}"))
-        })?
-    };
+    let mut doc = read_config_document(path)?;
 
-    // Do not write a disabled primary as a side effect of saving an API key.
-    // With no enabled vendors, leave any existing value alone so the legacy
-    // resolver's Anthropic fallback remains intact.
+    // Remove fields written by the short-lived inline Copilot-token design.
+    // GitHub CLI owns the OAuth credential now; retaining a secret this app
+    // neither reads nor supports would be misleading and unsafe.
+    if let Some(table) = doc
+        .get_mut("copilot")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        table.remove("token");
+        table.remove("token_env");
+    }
+
+    // Only Copilot is deliberately offered before it is enabled: choosing it
+    // is the explicit opt-in after the GitHub CLI login. All other choices
+    // remain enabled-only, so no failed provider is persisted as primary.
     if state.primary_choices.contains(&state.primary) {
         set_string(&mut doc, "ui", "primary", state.primary.slug())?;
+        if state.primary == VendorId::Copilot {
+            set_bool(&mut doc, "copilot", "enabled", true)?;
+        }
     }
 
     for (i, kv) in KEY_VENDORS.iter().enumerate() {
         let Some(input) = state.keys.get(i) else {
             continue;
         };
-        update_key(&mut doc, kv.section, input)?;
+        update_key(&mut doc, kv, input)?;
     }
 
-    let bytes = doc.to_string();
-    crate::cache::atomic_write(path, bytes.as_bytes())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
-        }
-    }
-    Ok(())
+    write_config_document(path, &doc)
 }
 
-/// Apply one key field to the document. Untouched fields are left alone; a
-/// field the user cleared is *removed*, so an inline secret can be deleted
-/// from the overlay rather than lingering in the file. Writing a non-empty key
-/// also opts the vendor in — the opt-in vendors would otherwise never fetch.
-fn update_key(doc: &mut DocumentMut, section: &str, input: &KeyInput) -> Result<()> {
+/// Apply one credential field to the document. Untouched fields are left
+/// alone; a field the user cleared is *removed*, so an inline secret can be
+/// deleted from the overlay rather than lingering in the file. Writing a
+/// non-empty credential also opts the vendor in — the opt-in vendors would
+/// otherwise never fetch.
+fn update_key(doc: &mut DocumentMut, vendor: &KeyVendor, input: &KeyInput) -> Result<()> {
     if !input.dirty {
         return Ok(());
     }
     if input.buf.is_empty() {
-        if let Some(table) = doc.get_mut(section).and_then(toml_edit::Item::as_table_mut) {
-            table.remove("api_key");
+        if let Some(table) = doc
+            .get_mut(vendor.section)
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            table.remove(vendor.config_key);
         }
         return Ok(());
     }
-    set_string(doc, section, "api_key", &input.buf)?;
-    set_bool(doc, section, "enabled", true)
+    set_string(doc, vendor.section, vendor.config_key, &input.buf)?;
+    set_bool(doc, vendor.section, "enabled", true)
 }
 
 /// Set or update a string field in a TOML section, preserving comments and
 /// formatting of unaffected nodes.
 fn set_string(doc: &mut DocumentMut, section: &str, key: &str, new_value: &str) -> Result<()> {
-    let table = doc
-        .entry(section)
-        .or_insert_with(toml_edit::table)
-        .as_table_mut()
-        .ok_or_else(|| AppError::Other(format!("config.toml: [{section}] is not a table")))?;
-
-    if let Some(item) = table.get_mut(key)
-        && let Some(v) = item.as_value_mut()
-    {
-        *v = toml_edit::Value::from(new_value);
-        v.decor_mut().set_prefix(" ");
-        return Ok(());
-    }
-    table.insert(key, value(new_value));
-    Ok(())
-}
-
-/// Same as [`set_string`] for a boolean field.
-fn set_bool(doc: &mut DocumentMut, section: &str, key: &str, new_value: bool) -> Result<()> {
     let table = doc
         .entry(section)
         .or_insert_with(toml_edit::table)
@@ -593,6 +574,7 @@ struct KeyStatus {
     id: String,
     label: String,
     environment: String,
+    secret_label: String,
     note: String,
     configured: bool,
     inline_configured: bool,
@@ -622,23 +604,6 @@ const SETTINGS_SCHEMA_VERSION: u8 = 1;
 const MAX_SETTINGS_REQUEST_BYTES: u64 = 64 * 1024;
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
 
-fn configured_key_env<'a>(cfg: &'a Config, section: &str, fallback: &'a str) -> &'a str {
-    match section {
-        "anthropic_api" => &cfg.anthropic_api.api_key_env,
-        "zai" => &cfg.zai.api_key_env,
-        "openrouter" => &cfg.openrouter.api_key_env,
-        "deepseek" => &cfg.deepseek.api_key_env,
-        "kimi" => &cfg.kimi.api_key_env,
-        "kilo" => &cfg.kilo.api_key_env,
-        "novita" => &cfg.novita.api_key_env,
-        "moonshot" => &cfg.moonshot.api_key_env,
-        "grok" => &cfg.grok.api_key_env,
-        "minimax" => &cfg.minimax.api_key_env,
-        "opencode-go" => &cfg.opencode_go.api_key_env,
-        _ => fallback,
-    }
-}
-
 fn snapshot_from_config_with(
     cfg: &Config,
     environment_configured: impl Fn(&str) -> bool,
@@ -655,14 +620,14 @@ fn snapshot_from_config_with(
     let keys = KEY_VENDORS
         .iter()
         .map(|vendor| {
-            let environment = configured_key_env(cfg, vendor.section, vendor.env);
-            let inline_configured =
-                config_inline_key(cfg, vendor.section).is_some_and(|v| !v.is_empty());
+            let environment = cfg.api_key_env_for(vendor.id);
+            let inline_configured = cfg.inline_api_key(vendor.id).is_some();
             let environment_configured = environment_configured(environment);
             KeyStatus {
                 id: vendor.id.slug().to_string(),
                 label: vendor.label.to_string(),
                 environment: environment.to_string(),
+                secret_label: vendor.secret_label.to_string(),
                 note: vendor.note.to_string(),
                 configured: inline_configured || environment_configured,
                 inline_configured,
@@ -725,23 +690,26 @@ fn state_from_apply_request(cfg: &Config, raw: &str) -> Result<SettingsState> {
         let index = KEY_VENDORS
             .iter()
             .position(|vendor| vendor.id.slug() == id)
-            .ok_or_else(|| AppError::Other(format!("unknown API-key vendor {id:?}")))?;
+            .ok_or_else(|| AppError::Other(format!("unknown credential vendor {id:?}")))?;
         let input = &mut state.keys[index];
         match mutation {
             KeyMutation::Set { value } => {
                 if value.is_empty() {
                     return Err(AppError::Other(format!(
-                        "API key for {id:?} is empty; use the clear action to remove it"
+                        "{} for {id:?} is empty; use the clear action to remove it",
+                        KEY_VENDORS[index].secret_label
                     )));
                 }
                 if value.len() > MAX_API_KEY_BYTES {
                     return Err(AppError::Other(format!(
-                        "API key for {id:?} exceeds {MAX_API_KEY_BYTES} bytes"
+                        "{} for {id:?} exceeds {MAX_API_KEY_BYTES} bytes",
+                        KEY_VENDORS[index].secret_label
                     )));
                 }
                 if value.chars().any(char::is_control) {
                     return Err(AppError::Other(format!(
-                        "API key for {id:?} contains control characters"
+                        "{} for {id:?} contains control characters",
+                        KEY_VENDORS[index].secret_label
                     )));
                 }
                 input.buf = value;
@@ -826,14 +794,14 @@ pub fn render(f: &mut Frame, area: Rect, state: &SettingsState, theme: &Theme) {
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(inner);
 
-    // — Primary vendor + API keys header —
+    // — Primary vendor + credentials header —
     let mut lines: Vec<Line> = vec![
         section_header("Primary vendor", "shown first on the bar / TUI", &bubble),
         primary_line(state, &bubble),
         Line::from(""),
         section_header(
-            "API keys",
-            "pick a row, type the key, then Ctrl-S — Claude & Codex use CLI login",
+            "Credentials",
+            "pick a row, type the credential, then Ctrl-S — Claude & Codex use CLI login",
             &bubble,
         ),
     ];
@@ -914,10 +882,11 @@ fn key_row(kv: &KeyVendor, input: &KeyInput, focused: bool, theme: &BubbleTheme)
     let value = value_text(input, focused);
 
     // Env / status suffix: env-var name, whether an env override is set, note.
-    let env_set = std::env::var(kv.env)
+    let env_name = kv.id.api_key_env();
+    let env_set = std::env::var(env_name)
         .map(|v| !v.is_empty())
         .unwrap_or(false);
-    let mut suffix = format!("   {}", kv.env);
+    let mut suffix = format!("   {env_name}");
     if env_set {
         suffix.push_str(" · env set (overrides)");
     }
@@ -1094,13 +1063,26 @@ mod tests {
     }
 
     #[test]
+    fn copilot_has_no_editable_credential_field() {
+        assert!(
+            !KEY_VENDORS
+                .iter()
+                .any(|vendor| vendor.id == VendorId::Copilot)
+        );
+    }
+
+    #[test]
     fn from_config_offers_enabled_vendors_only() {
         let cfg = Config::default();
         let s = SettingsState::from_config(&cfg);
-        assert_eq!(s.primary_choices, cfg.enabled_vendors());
-        // Opt-in vendors are disabled by default and must not be offered.
+        let mut expected = cfg.enabled_vendors();
+        expected.push(VendorId::Copilot);
+        assert_eq!(s.primary_choices, expected);
+        // API-key opt-in vendors are disabled by default and must not be
+        // offered. Copilot is the exception: choosing it enables it safely.
         assert!(!s.primary_choices.contains(&VendorId::Grok));
         assert!(s.primary_choices.contains(&s.primary));
+        assert!(s.primary_choices.contains(&VendorId::Copilot));
     }
 
     #[test]
@@ -1331,6 +1313,16 @@ api_key_env = "OPENROUTER_WORK_API_KEY"
     }
 
     #[test]
+    fn disabled_copilot_is_offered_but_not_shown_as_the_current_primary() {
+        let mut cfg = Config::default();
+        cfg.ui.primary = Some(VendorId::Copilot);
+        let state = SettingsState::from_config(&cfg);
+
+        assert!(state.primary_choices.contains(&VendorId::Copilot));
+        assert_eq!(state.primary, VendorId::Anthropic);
+    }
+
+    #[test]
     fn save_does_not_write_a_disabled_primary() {
         // Saving an API key must not persist a primary the resolver would
         // ignore; an existing value in the file stays untouched.
@@ -1539,6 +1531,27 @@ api_key_env = "OPENROUTER_WORK_API_KEY"
     }
 
     #[test]
+    fn native_snapshot_offers_copilot_primary_without_a_token_field() {
+        let cfg = Config::default();
+        let raw = settings_snapshot_json_with(&cfg, |_| false).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            parsed["primary_choices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == "copilot")
+        );
+        assert!(
+            !parsed["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == "copilot")
+        );
+    }
+
+    #[test]
     fn native_key_only_patch_does_not_require_or_replace_primary() {
         let cfg = Config::default();
         let original_primary = SettingsState::from_config(&cfg).primary;
@@ -1608,6 +1621,24 @@ enabled = true
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("remove-me"));
         assert!(raw.contains("keep-me"));
+    }
+
+    #[test]
+    fn native_primary_selection_enables_copilot_without_writing_a_token() {
+        let (_dir, path) = temp_config(Some(
+            "[copilot]\nenabled = false\ntoken = \"legacy-value\"\ntoken_env = \"OLD_TOKEN\"\n",
+        ));
+        let cfg = Config::load_from(&path).unwrap();
+        let select = serde_json::json!({
+            "schema_version": 1,
+            "primary": "copilot"
+        });
+        apply_settings_json_to_path(&cfg, &select.to_string(), &path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("enabled = true"));
+        assert!(raw.contains("primary = \"copilot\""));
+        assert!(!raw.contains("token ="));
+        assert!(!raw.contains("token_env ="));
     }
 
     #[test]

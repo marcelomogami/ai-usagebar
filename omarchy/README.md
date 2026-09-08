@@ -72,11 +72,16 @@ rather than argv or the environment. Leave a field blank to keep its current
 value, or use its clear button to remove an inline key. Saving a new key also
 enables that provider, matching the terminal overlay.
 
-Not every provider has a key field, and a missing one is not an omission.
-Claude, Codex, Cursor, Kiro, Antigravity, and Command Code authenticate through
-a login that already exists on the machine, so they appear in the provider
-selector but never in the key list — enable them in `config.toml` and they work
-with nothing to paste.
+Not every provider has a credential field, and a missing one is not an omission.
+Claude, Codex, GitHub Copilot, Cursor, Kiro, Antigravity, and Command Code
+authenticate through an existing official or local login, so they never appear
+in the key list. For GitHub Copilot, click **Log in with GitHub Copilot** to
+run `gh auth login --web` in a terminal. Complete the login, then choose
+**GitHub Copilot** under **Primary Provider** and save. That explicitly enables
+`[copilot]` and makes it the app-wide default. The fetcher obtains OAuth only
+through the fixed `gh auth token` command; it never parses GitHub CLI, editor,
+or browser credential stores and never saves a token. A non-empty
+`GITHUB_COPILOT_TOKEN` is an optional explicit override.
 
 Existing installations need no migration: `config.toml`, environment-variable
 precedence, the TUI, Waybar, macOS, and Windows behavior are unchanged. If the
@@ -102,23 +107,30 @@ omarchy bar set akitaonrails.ai-usagebar showValue false --json
 
 # Opt in to the Waybar-style provider tag. The default is false.
 omarchy bar set akitaonrails.ai-usagebar showProvider true --json
+
+# Show every configured provider's icon and usage at once. The default is false.
+omarchy bar set akitaonrails.ai-usagebar showAll true --json
 ```
 
 The refresh interval is clamped to 30–3600 seconds. The `provider` setting
 prefers an exact entry id; if there is no exact match, a base id such as
-`anthropic` selects all accounts for that provider. `showValue` and
-`showProvider` change only the top-bar label; neither hides report details or
-changes provider fetching.
+`anthropic` selects all accounts for that provider. `showValue`,
+`showProvider`, and `showAll` change only the top-bar label; none hide report
+details or change provider fetching.
 
 `showProvider` draws the `short_name` the Rust report ships for the selected
 entry, so the codes never fork from Waybar's `{vendor_short}`: `cld 29%`,
 `gpt 95%`, `agy 81%`. Every account of one provider shares that provider's
 code — the panel and tooltip remain the place that tells `Claude · work` from
 `Claude · personal`. With both toggles on the bar reads icon + `cld 29%`; with
-`showValue` off it is the icon and `cld`. A vertical bar has room for neither
-and keeps showing the icon alone. Against an `ai-usagebar` older than the
-`short_name` field the tag falls back to the entry id's provider half
-(`anthropic 29%`) until the binary is updated.
+`showValue` off it is the icon and `cld`. `showAll` draws every visible
+entry as its own chip with a brand SVG (see [`icons/README.md`](icons/README.md)
+for source and licence). Grok and SuperGrok share a mark; Command Code has
+none and falls back to its three-letter code. A vertical bar has room for
+none of this and keeps showing a single icon.
+Against an `ai-usagebar` older than the `short_name` field the tag falls
+back to the entry id's provider half (`anthropic 29%`) until the binary is
+updated.
 
 ## Development checks
 

@@ -12,10 +12,10 @@ use crate::error::{AppError, Result};
 use crate::usage::{SuperGrokPeriod, SuperGrokSnapshot};
 
 use super::scope::ScopePaths;
-use super::{acp, scope, types};
+use super::{acp, direct, resets, scope, types};
 
 const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
-const CACHE_SCHEMA: u8 = 2;
+const CACHE_SCHEMA: u8 = 3;
 
 /// This vendor's [`Outcome`](crate::outcome::Outcome) — the shared shape,
 /// specialised to its snapshot.
@@ -32,9 +32,30 @@ pub async fn fetch_snapshot(
         cache_ttl,
         Utc::now(),
         || scope::fingerprint(scope_paths),
-        || acp::fetch_billing(grok_binary),
+        || fetch_billing_any(grok_binary, scope_paths),
     )
     .await
+}
+
+/// Direct HTTPS billing first, the ACP process as fallback.
+///
+/// Grok Build CLI 1.0.13 removed the `x.ai/billing` ACP extension, so the
+/// documented proxy endpoint is now the primary transport; the ACP path keeps
+/// serving builds where that endpoint is unavailable. When both fail, the
+/// direct error is reported — it reflects the actual login state.
+async fn fetch_billing_any(
+    grok_binary: &Path,
+    scope_paths: &ScopePaths,
+) -> Result<types::BillingResponse> {
+    let mut response = match direct::fetch_billing(&scope_paths.auth).await {
+        Ok(response) => Ok(response),
+        Err(direct_error) => match acp::fetch_billing(grok_binary).await {
+            Ok(response) => Ok(response),
+            Err(_) => Err(direct_error),
+        },
+    }?;
+    response.reset_credits = resets::fetch(&scope_paths.auth).await.unwrap_or_default();
+    Ok(response)
 }
 
 async fn fetch_snapshot_with<S, F, Fut>(
@@ -83,12 +104,7 @@ where
                 snapshot.account = "uncached".into();
             }
 
-            Ok(FetchOutcome {
-                snapshot,
-                stale: false,
-                last_error: None,
-                cache_age: Some(Duration::ZERO),
-            })
+            Ok(crate::outcome::Outcome::fresh(snapshot))
         }
         Err(error) => fallback(cache, scope_before.as_deref(), now, error),
     }
@@ -112,6 +128,8 @@ struct CachedSnapshot {
     period: String,
     reset_at: Option<DateTime<Utc>>,
     prepaid_balance: Option<f64>,
+    #[serde(default)]
+    reset_credits: crate::usage::ResetCredits,
 }
 
 impl CachedEnvelope {
@@ -130,6 +148,7 @@ impl CachedEnvelope {
                 period: period.to_string(),
                 reset_at: snapshot.reset_at,
                 prepaid_balance: snapshot.prepaid_balance,
+                reset_credits: snapshot.reset_credits.clone(),
             },
         }
     }
@@ -178,6 +197,15 @@ fn parse_cache(bytes: &[u8], account_scope: &str) -> Result<SuperGrokSnapshot> {
             "SuperGrok cached prepaid balance is invalid".into(),
         ));
     }
+    // The count comes from the tokens themselves, so more expiries than
+    // credits means the two disagree about what was in the response.
+    if cached.snapshot.reset_credits.credits.len()
+        > cached.snapshot.reset_credits.available as usize
+    {
+        return Err(AppError::Schema(
+            "SuperGrok cached reset credits are inconsistent".into(),
+        ));
+    }
 
     Ok(SuperGrokSnapshot {
         plan: cached.snapshot.plan,
@@ -186,6 +214,7 @@ fn parse_cache(bytes: &[u8], account_scope: &str) -> Result<SuperGrokSnapshot> {
         period,
         reset_at: cached.snapshot.reset_at,
         prepaid_balance: cached.snapshot.prepaid_balance,
+        reset_credits: cached.snapshot.reset_credits,
     })
 }
 
@@ -195,12 +224,11 @@ fn reuse_cache(
     stale: bool,
     account_scope: &str,
 ) -> Result<FetchOutcome> {
-    Ok(FetchOutcome {
-        snapshot: parse_cache(bytes, account_scope)?,
+    Ok(crate::outcome::Outcome::cached(
+        parse_cache(bytes, account_scope)?,
+        cache,
         stale,
-        last_error: cache.read_last_error(),
-        cache_age: cache.payload_age(),
-    })
+    ))
 }
 
 /// SuperGrok adds one rule to the shared policy: a cached snapshot whose
@@ -269,6 +297,87 @@ mod tests {
             "subscription_tier": "SuperGrok"
         }))
         .unwrap()
+    }
+
+    /// The reset inventory is fetched beside the billing response, so it has
+    /// to survive the cache with it: a hit that dropped it would show the
+    /// resets for one refresh and then quietly stop mentioning them.
+    #[tokio::test]
+    async fn banked_resets_survive_the_cache_round_trip() {
+        let (_td, cache) = fixture();
+        let expiry = Utc.with_ymd_and_hms(2026, 8, 12, 0, 0, 0).unwrap();
+        let mut response = weekly_response(10.0);
+        response.reset_credits = crate::usage::ResetCredits {
+            available: 2,
+            credits: vec![crate::usage::ResetCredit {
+                title: None,
+                expires_at: Some(expiry),
+            }],
+        };
+        let fresh = fetch_snapshot_with(
+            &cache,
+            Duration::from_secs(3600),
+            now(),
+            || Some("scope-a".into()),
+            || async { Ok(response) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(fresh.snapshot.reset_credits.available, 2);
+
+        let cached = fetch_snapshot_with(
+            &cache,
+            Duration::from_secs(3600),
+            now(),
+            || Some("scope-a".into()),
+            || async { panic!("a fresh cache must not refetch") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(cached.snapshot.reset_credits.available, 2);
+        assert_eq!(cached.snapshot.reset_credits.next_expiry(), Some(expiry));
+    }
+
+    #[test]
+    fn a_cache_claiming_more_expiries_than_credits_is_rejected() {
+        let cached = serde_json::json!({
+            "schema": CACHE_SCHEMA,
+            "scope": "scope-a",
+            "snapshot": {
+                "plan": "SuperGrok",
+                "percent": 5,
+                "period": "weekly",
+                "reset_at": null,
+                "prepaid_balance": null,
+                "reset_credits": {
+                    "available": 1,
+                    "credits": [
+                        {"expires_at": "2026-08-12T00:00:00Z"},
+                        {"expires_at": "2026-08-19T00:00:00Z"}
+                    ]
+                }
+            }
+        });
+        assert!(parse_cache(cached.to_string().as_bytes(), "scope-a").is_err());
+    }
+
+    /// A cache written before this vendor knew about banked resets is not
+    /// wrong, it is silent — it must still load, reporting none.
+    #[test]
+    fn a_cache_without_reset_credits_still_loads() {
+        let cached = serde_json::json!({
+            "schema": CACHE_SCHEMA,
+            "scope": "scope-a",
+            "snapshot": {
+                "plan": "SuperGrok",
+                "percent": 5,
+                "period": "weekly",
+                "reset_at": null,
+                "prepaid_balance": null
+            }
+        });
+        let snapshot = parse_cache(cached.to_string().as_bytes(), "scope-a").unwrap();
+        assert!(snapshot.reset_credits.is_empty());
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use chrono::DateTime;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -66,12 +67,7 @@ pub async fn fetch_snapshot(
     if let Some(bytes) = cache.fresh_payload(ttl)?
         && let Ok(snapshot) = parse_cache(&bytes, &target)
     {
-        return Ok(FetchOutcome {
-            snapshot,
-            stale: false,
-            last_error: cache.read_last_error(),
-            cache_age: cache.payload_age(),
-        });
+        return Ok(crate::outcome::Outcome::cached(snapshot, cache, false));
     }
 
     match fetch_live(client, token, endpoints).await {
@@ -81,12 +77,7 @@ pub async fn fetch_snapshot(
                 "response": snapshot_repr(&snapshot),
             }))?;
             cache.write_payload(&body)?;
-            Ok(FetchOutcome {
-                snapshot,
-                stale: false,
-                last_error: None,
-                cache_age: Some(Duration::ZERO),
-            })
+            Ok(crate::outcome::Outcome::fresh(snapshot))
         }
         Err(error @ AppError::Transport(_)) => fallback_or_error(cache, None, &target, error),
         Err(AppError::Http { status, .. }) => {
@@ -209,6 +200,7 @@ fn snapshot_repr(snapshot: &Snapshot) -> Value {
     serde_json::json!({
         "plan": snapshot.plan,
         "creditPool": snapshot.credit_pool,
+        "periodEnd": snapshot.period_end.map(|at| at.timestamp_millis()),
         "credits": snapshot.credits.as_ref().map(|c| serde_json::json!({
             "monthlyCredits": c.monthly,
             "purchasedCredits": c.purchased,
@@ -239,6 +231,12 @@ fn parse_cache(bytes: &[u8], target: &str) -> Result<Snapshot> {
         .and_then(Value::as_str)
         .map(str::to_string);
     snapshot.credit_pool = response.get("creditPool").and_then(Value::as_f64);
+    // Older caches predate the field; a missing entry simply clears it and
+    // the next live refresh restores it.
+    snapshot.period_end = response
+        .get("periodEnd")
+        .and_then(Value::as_i64)
+        .and_then(DateTime::from_timestamp_millis);
     Ok(snapshot)
 }
 

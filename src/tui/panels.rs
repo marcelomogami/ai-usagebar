@@ -19,7 +19,7 @@ use ratatui_bubbletea_components::{Progress, Spinner, SpinnerFrames};
 use ratatui_bubbletea_theme::BubbleTheme;
 
 use crate::countdown;
-use crate::format::{local_time_hms, money, usd};
+use crate::format::{local_time_hms, money, reset_credit_lines, usd};
 use crate::pacing::{self, PaceSeverity};
 use crate::pango::severity_for;
 use crate::theme::Theme;
@@ -70,6 +70,11 @@ pub(crate) struct SectionProjection {
     pub section: Section,
     pub reset_at: Option<DateTime<Utc>>,
     pub elapsed_percent: Option<i32>,
+    /// Full length of the metric's reset window, when it is known exactly
+    /// (a rolling 5h/7d window). `None` for calendar periods and for quotas
+    /// whose window length the vendor never states — a frontend can pace a
+    /// metric only when this is `Some`.
+    pub window: Option<chrono::Duration>,
 }
 
 struct SectionBuilder(Vec<SectionProjection>);
@@ -88,6 +93,7 @@ impl SectionBuilder {
                         section,
                         reset_at: None,
                         elapsed_percent: None,
+                        window: None,
                     }
                 })
                 .collect(),
@@ -103,25 +109,51 @@ impl SectionBuilder {
             section,
             reset_at: None,
             elapsed_percent: None,
+            window: None,
         });
     }
 
+    /// A metric whose window length is not known exactly (a calendar month,
+    /// a vendor-defined billing period, or no stated window at all).
     fn push_metric(&mut self, section: Section, reset_at: Option<DateTime<Utc>>) {
-        self.push_metric_with_pacing(section, reset_at, None);
+        self.push_metric_with_metadata(section, reset_at, None, None);
     }
 
-    fn push_metric_with_pacing(
+    fn push_metric_with_metadata(
         &mut self,
         section: Section,
         reset_at: Option<DateTime<Utc>>,
         elapsed_percent: Option<i32>,
+        window: Option<chrono::Duration>,
     ) {
         assert!(matches!(section, Section::Metric { .. }));
         self.0.push(SectionProjection {
             section,
             reset_at,
             elapsed_percent,
+            window,
         });
+    }
+
+    /// A metric on a window of exactly `window` length, so a frontend can
+    /// compute how far through the window `reset_at` sits.
+    fn push_metric_in_window(
+        &mut self,
+        section: Section,
+        reset_at: Option<DateTime<Utc>>,
+        window: chrono::Duration,
+    ) {
+        self.push_metric_with_metadata(section, reset_at, None, Some(window));
+    }
+
+    fn push_metric_with_pacing_in_window(
+        &mut self,
+        section: Section,
+        reset_at: Option<DateTime<Utc>>,
+        elapsed_percent: Option<i32>,
+        window: chrono::Duration,
+    ) {
+        self.push_metric_with_metadata(section, reset_at, elapsed_percent, Some(window));
     }
 }
 
@@ -248,6 +280,12 @@ pub fn compact_cells(
             }
             (s.plan.clone(), cells)
         }
+        VendorSnapshot::Copilot(s) => (
+            s.plan.clone(),
+            s.quotas()
+                .map(|(label, quota)| pct(label, quota.used_pct()))
+                .collect(),
+        ),
         VendorSnapshot::Zai(s) => {
             let mut cells = Vec::new();
             if let Some(w) = &s.session {
@@ -273,7 +311,7 @@ pub fn compact_cells(
         VendorSnapshot::Deepseek(s) => (String::new(), vec![money_cell(s.balance, &s.currency)]),
         VendorSnapshot::Kimi(s) => (
             s.plan.clone().unwrap_or_default(),
-            vec![pct("wk", s.weekly_pct()), pct("5h", s.window_pct())],
+            vec![pct("5h", s.window_pct()), pct("wk", s.weekly_pct())],
         ),
         VendorSnapshot::Kilo(s) => (String::new(), vec![usd_cell(s.balance)]),
         VendorSnapshot::Novita(s) => (String::new(), vec![usd_cell(s.available)]),
@@ -282,10 +320,13 @@ pub fn compact_cells(
         VendorSnapshot::SuperGrok(s) => (s.plan.clone(), vec![pct(s.period.short(), s.weekly_pct)]),
         VendorSnapshot::Antigravity(s) => (
             s.plan.clone(),
-            vec![
-                format_win("S", Some(&s.session), false),
-                format_win("W", Some(&s.weekly), true),
-            ],
+            [
+                s.session.as_ref().map(|w| format_win("S", Some(w), false)),
+                s.weekly.as_ref().map(|w| format_win("W", Some(w), true)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         ),
         VendorSnapshot::Cursor(s) => (
             s.plan.clone(),
@@ -316,6 +357,7 @@ pub fn compact_cells(
             let cells = [
                 ("session", s.five_hour.as_ref()),
                 ("weekly", s.weekly.as_ref()),
+                ("monthly", s.monthly_window().as_ref()),
             ]
             .into_iter()
             .filter_map(|(label, window)| window.map(|window| pct(label, window.pct())))
@@ -335,6 +377,14 @@ pub fn compact_cells(
             .collect();
             ("OpenCode Go".into(), cells)
         }
+        VendorSnapshot::Custom(s) => (
+            s.plan.clone().unwrap_or_default(),
+            s.metrics
+                .iter()
+                .take(3)
+                .map(|metric| pct(&metric.label, i32::from(metric.pct)))
+                .collect(),
+        ),
     };
     for cell in &mut cells {
         cell.label = cell
@@ -372,6 +422,7 @@ pub fn headline_pct(snapshot: &VendorSnapshot) -> Option<i32> {
         .into_iter()
         .flatten()
         .max(),
+        VendorSnapshot::Copilot(s) => s.quotas().map(|(_, quota)| quota.used_pct()).max(),
         VendorSnapshot::Zai(s) => [
             s.session.as_ref().map(|w| w.utilization_pct),
             s.weekly.as_ref().map(|w| w.utilization_pct),
@@ -380,9 +431,15 @@ pub fn headline_pct(snapshot: &VendorSnapshot) -> Option<i32> {
         .flatten()
         .max(),
         VendorSnapshot::Kimi(s) => Some(s.weekly_pct().max(s.window_pct())),
-        VendorSnapshot::Antigravity(s) => {
-            Some(s.session.utilization_pct.max(s.weekly.utilization_pct))
-        }
+        VendorSnapshot::Antigravity(s) => [
+            s.session.as_ref().map(|w| w.utilization_pct),
+            s.weekly.as_ref().map(|w| w.utilization_pct),
+            s.third_party_session.as_ref().map(|w| w.utilization_pct),
+            s.third_party_weekly.as_ref().map(|w| w.utilization_pct),
+        ]
+        .into_iter()
+        .flatten()
+        .max(),
         VendorSnapshot::Cursor(s) => (!s.unlimited).then_some(s.total_pct),
         VendorSnapshot::Minimax(s) => Some(s.session.utilization_pct.max(s.weekly.utilization_pct)),
         VendorSnapshot::Kiro(s) => Some(s.pct()),
@@ -408,6 +465,7 @@ pub fn headline_pct(snapshot: &VendorSnapshot) -> Option<i32> {
         .flatten()
         .max(),
         VendorSnapshot::SuperGrok(s) => Some(s.weekly_pct),
+        VendorSnapshot::Custom(s) => s.metrics.first().map(|metric| i32::from(metric.pct)),
         VendorSnapshot::Openrouter(_)
         | VendorSnapshot::Deepseek(_)
         | VendorSnapshot::Kilo(_)
@@ -440,18 +498,28 @@ pub(crate) fn sections_with_metadata_for(
                 value: "  Loading…".into(),
             },
         ]),
-        TabState::Error(e) => SectionBuilder::new(vec![
-            Section::Spacer,
-            Section::Text {
-                label: "Error".into(),
-                value: e.clone(),
-            },
-            Section::Spacer,
-            Section::Text {
-                label: "".into(),
-                value: "Press `r` to retry, `q` to quit.".into(),
-            },
-        ]),
+        TabState::Error { message: e, plan } => {
+            let mut rows = Vec::new();
+            if let Some(plan) = plan {
+                rows.push(Section::Title {
+                    left: plan.clone(),
+                    right: None,
+                });
+            }
+            rows.extend([
+                Section::Spacer,
+                Section::Text {
+                    label: "Error".into(),
+                    value: e.clone(),
+                },
+                Section::Spacer,
+                Section::Text {
+                    label: "".into(),
+                    value: "Press `r` to retry, `q` to quit.".into(),
+                },
+            ]);
+            SectionBuilder::new(rows)
+        }
         TabState::Ready(r) => {
             let snapshot = &r.snapshot;
             let last_error = &r.last_error;
@@ -459,6 +527,7 @@ pub(crate) fn sections_with_metadata_for(
                 VendorSnapshot::Anthropic(s) => anthropic_sections(s, now, pace_tolerance),
                 VendorSnapshot::AnthropicApi(s) => anthropic_api_sections(s),
                 VendorSnapshot::Openai(s) => openai_sections(s, now, pace_tolerance),
+                VendorSnapshot::Copilot(s) => copilot_sections(s, now),
                 VendorSnapshot::Zai(s) => zai_sections(s, now, pace_tolerance),
                 VendorSnapshot::Openrouter(s) => openrouter_sections(s),
                 VendorSnapshot::Deepseek(s) => deepseek_sections(s),
@@ -475,6 +544,7 @@ pub(crate) fn sections_with_metadata_for(
                 VendorSnapshot::NousResearch(s) => nous_sections(s, now),
                 VendorSnapshot::OpenCodeGo(s) => opencode_go_sections(s, now),
                 VendorSnapshot::CommandCode(s) => commandcode_sections(s, now),
+                VendorSnapshot::Custom(s) => custom_sections(s),
             };
             // Inject the (already-absolute) fetched-at instant into the title
             // row, right-aligned. Pre-snapshotted in app::refresh_one so it
@@ -693,6 +763,32 @@ fn openai_sections(
     if let Some(cr) = &s.code_review {
         push_window(&mut v, "Code review", cr, now, tol, false);
     }
+    // A named limit can be the binding one while the headline window reads
+    // low, so it gets a real row rather than a footnote.
+    for limit in &s.additional_limits {
+        if let Some(w) = &limit.session {
+            push_window(&mut v, &format!("{} (5h)", limit.name), w, now, tol, false);
+        }
+        if let Some(w) = &limit.weekly {
+            push_window(&mut v, &format!("{} (7d)", limit.name), w, now, tol, false);
+        }
+    }
+    // No percentage reflects a model the account cannot dispatch to, so say it
+    // outright rather than leaving the user to infer it from healthy bars.
+    if !s.unavailable_models.is_empty() {
+        v.push(Section::Spacer);
+        v.push(Section::Block {
+            label: "Unavailable".into(),
+            body: s
+                .unavailable_models
+                .iter()
+                .map(|m| match m.available_at {
+                    Some(at) => format!("{} — back {}", m.model, countdown::format(Some(at), now)),
+                    None => format!("{} — at capacity", m.model),
+                })
+                .collect(),
+        });
+    }
     if let Some(c) = &s.credits {
         v.push(Section::Spacer);
         let balance = if c.unlimited {
@@ -712,7 +808,47 @@ fn openai_sections(
             body,
         });
     }
+    push_reset_credits(&mut v, &s.reset_credits, now);
     v
+}
+
+fn copilot_sections(s: &crate::copilot::types::Snapshot, now: DateTime<Utc>) -> SectionBuilder {
+    let mut sections = SectionBuilder::new(vec![Section::Title {
+        left: format!("GitHub Copilot {}", s.plan),
+        right: None,
+    }]);
+    for (label, quota) in s.quotas() {
+        let pct = quota.used_pct();
+        let detail = if quota.unlimited {
+            "Unlimited".to_string()
+        } else {
+            quota
+                .used_and_entitlement()
+                .map(|(used, entitlement)| format!("{used} of {entitlement} used"))
+                .unwrap_or_else(|| format!("{}% remaining", quota.percent_remaining))
+        };
+        sections.push(Section::Spacer);
+        sections.push_metric(
+            Section::Metric {
+                label: label.to_string(),
+                pct: pct.clamp(0, 100) as u16,
+                severity: severity_for(pct),
+                value_label: if quota.unlimited {
+                    "Unlimited".to_string()
+                } else {
+                    format!("{pct}%")
+                },
+                footnote: detail,
+            },
+            s.reset_at,
+        );
+    }
+    sections.push(Section::Spacer);
+    sections.push(Section::Text {
+        label: "Resets".into(),
+        value: countdown::format(s.reset_at, now),
+    });
+    sections
 }
 
 fn zai_sections(s: &crate::usage::ZaiSnapshot, now: DateTime<Utc>, tol: u32) -> SectionBuilder {
@@ -804,20 +940,50 @@ fn antigravity_sections(
         right: None,
     }]);
     for (heading, primary, third_party) in [
-        ("Session", &s.session, s.third_party_session.as_ref()),
-        ("Weekly", &s.weekly, s.third_party_weekly.as_ref()),
+        (
+            "Session",
+            s.session.as_ref(),
+            s.third_party_session.as_ref(),
+        ),
+        ("Weekly", s.weekly.as_ref(), s.third_party_weekly.as_ref()),
     ] {
+        // A cadence no bucket reported gets no heading either — an empty
+        // "Session" with nothing under it reads as a failed fetch.
+        if primary.is_none() && third_party.is_none() {
+            continue;
+        }
         v.push(Section::Spacer);
         v.push(Section::Text {
             label: heading.into(),
             value: String::new(),
         });
-        push_window(&mut v, GROUP_PRIMARY, primary, now, 5, false);
+        if let Some(w) = primary {
+            push_window(&mut v, GROUP_PRIMARY, w, now, 5, false);
+        }
         if let Some(w) = third_party {
             push_window(&mut v, GROUP_THIRD_PARTY, w, now, 5, false);
         }
     }
+    // Figures read off the Cloud Code API while no product runs can lag what
+    // a running product would show; say where they came from.
+    if s.source == crate::usage::AntigravitySource::Remote {
+        v.push(Section::Spacer);
+        v.push(Section::Text {
+            label: "Source".into(),
+            value: "Google API (app closed)".into(),
+        });
+    }
     v
+}
+
+/// A Cursor pool row. The billing cycle carries an exact window only when the
+/// API stated both ends; when it did not, the row goes out with its reset time
+/// and no window rather than a guessed month a frontend would pace as exact.
+fn push_cursor_pool(v: &mut SectionBuilder, section: Section, s: &crate::usage::CursorSnapshot) {
+    match s.cycle_window() {
+        Some(window) => v.push_metric_in_window(section, s.reset_at, window),
+        None => v.push_metric(section, s.reset_at),
+    }
 }
 
 fn cursor_sections(s: &crate::usage::CursorSnapshot, now: DateTime<Utc>) -> SectionBuilder {
@@ -834,7 +1000,8 @@ fn cursor_sections(s: &crate::usage::CursorSnapshot, now: DateTime<Utc>) -> Sect
     } else {
         // Two included-usage pools, mirroring the dashboard's two bars.
         v.push(Section::Spacer);
-        v.push_metric(
+        push_cursor_pool(
+            &mut v,
             Section::Metric {
                 label: "Cursor Models".into(),
                 pct: s.auto_pct.clamp(0, 100) as u16,
@@ -842,10 +1009,11 @@ fn cursor_sections(s: &crate::usage::CursorSnapshot, now: DateTime<Utc>) -> Sect
                 value_label: format!("{}%", s.auto_pct),
                 footnote: "Auto + Composer".into(),
             },
-            s.reset_at,
+            s,
         );
         v.push(Section::Spacer);
-        v.push_metric(
+        push_cursor_pool(
+            &mut v,
             Section::Metric {
                 label: "Other Models".into(),
                 pct: s.api_pct.clamp(0, 100) as u16,
@@ -856,7 +1024,7 @@ fn cursor_sections(s: &crate::usage::CursorSnapshot, now: DateTime<Utc>) -> Sect
                     if s.on_demand_enabled { "on" } else { "off" }
                 ),
             },
-            s.reset_at,
+            s,
         );
     }
     v.push(Section::Spacer);
@@ -928,6 +1096,7 @@ fn commandcode_sections(
     for (label, window) in [
         ("Session (5h)", s.five_hour.as_ref()),
         ("Weekly", s.weekly.as_ref()),
+        ("Monthly", s.monthly_window().as_ref()),
     ] {
         if let Some(window) = window {
             let pct = window.pct();
@@ -949,17 +1118,9 @@ fn commandcode_sections(
     }
     if let Some(credits) = s.credits.as_ref() {
         sections.push(Section::Spacer);
-        let footnote = match (s.credits_spent(), s.credit_pool) {
-            (Some(spent), Some(pool)) => format!("{} of {} spent", usd(spent), usd(pool)),
-            _ => String::new(),
-        };
         sections.push(Section::Text {
             label: "Credits".into(),
-            value: if footnote.is_empty() {
-                usd(credits.remaining())
-            } else {
-                format!("{} · {footnote}", usd(credits.remaining()))
-            },
+            value: usd(credits.remaining()),
         });
     }
     sections
@@ -1139,6 +1300,49 @@ fn grok_sections(s: &crate::usage::GrokSnapshot) -> SectionBuilder {
     ])
 }
 
+/// A user-declared `[[custom]]` provider: the plan (if the response carried
+/// one), one gauge per configured metric, then the free-form text rows. The
+/// vendor never states a reset countdown of its own; a metric's `resets_at`
+/// and optional exact `window_secs` ride along as reset metadata so every
+/// frontend paces it exactly like a built-in.
+fn custom_sections(s: &crate::custom::types::CustomSnapshot) -> SectionBuilder {
+    let mut v = SectionBuilder::new(vec![
+        Section::Title {
+            left: s.plan.clone().unwrap_or_default(),
+            right: None,
+        },
+        Section::Spacer,
+    ]);
+    for metric in &s.metrics {
+        let pct = metric.pct.min(100);
+        let section = Section::Metric {
+            label: metric.label.clone(),
+            pct,
+            severity: severity_for(i32::from(pct)),
+            value_label: format!("{pct}%"),
+            footnote: metric.footnote.clone(),
+        };
+        match metric.window_secs {
+            Some(secs) => v.push_metric_in_window(
+                section,
+                metric.resets_at,
+                chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX)),
+            ),
+            None => v.push_metric(section, metric.resets_at),
+        }
+    }
+    if !s.texts.is_empty() {
+        v.push(Section::Spacer);
+        for text in &s.texts {
+            v.push(Section::Text {
+                label: text.label.clone(),
+                value: text.value.clone(),
+            });
+        }
+    }
+    v
+}
+
 fn supergrok_sections(s: &crate::usage::SuperGrokSnapshot, now: DateTime<Utc>) -> SectionBuilder {
     let pct = s.weekly_pct;
     let mut v = SectionBuilder::new(vec![
@@ -1148,21 +1352,20 @@ fn supergrok_sections(s: &crate::usage::SuperGrokSnapshot, now: DateTime<Utc>) -
         },
         Section::Spacer,
     ]);
-    v.push_metric(
-        Section::Metric {
-            label: format!("{} Build credits", s.period.label()),
-            pct: pct.clamp(0, 100) as u16,
-            severity: severity_for(pct),
-            value_label: format!("{pct}%"),
-            footnote: String::new(),
-        },
-        s.reset_at,
-    );
-    v.push(Section::Spacer);
-    v.push(Section::Text {
-        label: "Resets".into(),
-        value: countdown::format(s.reset_at, now),
-    });
+    let metric = Section::Metric {
+        label: format!("{} Build credits", s.period.label()),
+        pct: pct.clamp(0, 100) as u16,
+        severity: severity_for(pct),
+        value_label: format!("{pct}%"),
+        footnote: String::new(),
+    };
+    // Only the weekly period has an exact length; a month varies and an
+    // unknown period says nothing, so neither can be paced.
+    if s.period == crate::usage::SuperGrokPeriod::Weekly {
+        v.push_metric_in_window(metric, s.reset_at, chrono::Duration::days(7));
+    } else {
+        v.push_metric(metric, s.reset_at);
+    }
     if let Some(bal) = s.prepaid_balance {
         v.push(Section::Spacer);
         v.push(Section::Text {
@@ -1170,7 +1373,23 @@ fn supergrok_sections(s: &crate::usage::SuperGrokSnapshot, now: DateTime<Utc>) -
             value: usd(bal),
         });
     }
+    push_reset_credits(&mut v, &s.reset_credits, now);
     v
+}
+
+fn push_reset_credits(
+    v: &mut SectionBuilder,
+    credits: &crate::usage::ResetCredits,
+    now: DateTime<Utc>,
+) {
+    if credits.is_empty() {
+        return;
+    }
+    v.push(Section::Spacer);
+    v.push(Section::Block {
+        label: "Reset credits".into(),
+        body: reset_credit_lines(credits, now),
+    });
 }
 
 fn deepseek_sections(s: &crate::usage::DeepseekSnapshot) -> SectionBuilder {
@@ -1206,54 +1425,30 @@ fn deepseek_sections(s: &crate::usage::DeepseekSnapshot) -> SectionBuilder {
     v
 }
 
-fn kimi_sections(s: &crate::usage::KimiSnapshot, now: DateTime<Utc>, _tol: u32) -> SectionBuilder {
+/// Kimi reports each quota as used/limit against a limit of 100, so the pair
+/// is the percentage in longhand. Projecting both onto a `UsageWindow` lets
+/// the shared `push_window` draw them, which is what keeps the row identical
+/// to every other vendor's instead of a hand-rolled near-copy.
+fn kimi_sections(s: &crate::usage::KimiSnapshot, now: DateTime<Utc>, tol: u32) -> SectionBuilder {
+    use crate::kimi::vendor::{ROLLING_WINDOW, WEEKLY_WINDOW};
+
     let plan = s.plan.as_deref().unwrap_or("Kimi");
     let mut v = SectionBuilder::new(vec![Section::Title {
         left: plan.into(),
         right: None,
     }]);
-
-    let weekly_pct = s.weekly_pct().clamp(0, 100) as u16;
-    v.push(Section::Spacer);
-    v.push_metric(
-        Section::Metric {
-            label: "Weekly quota".into(),
-            pct: weekly_pct,
-            severity: severity_for(s.weekly_pct()),
-            // Same `{pct}%` every other vendor shows; the request counts stay
-            // on the footnote.
-            value_label: format!("{weekly_pct}%"),
-            footnote: format!(
-                "{} / {} · {} remaining · reset {}",
-                s.weekly_used,
-                s.weekly_limit,
-                s.weekly_remaining,
-                countdown::format(s.weekly_reset_at, now)
-            ),
-        },
-        s.weekly_reset_at,
-    );
+    let window = |pct, resets_at, window_duration| crate::usage::UsageWindow {
+        utilization_pct: pct,
+        resets_at,
+        window_duration,
+    };
 
     if s.window_limit > 0 {
-        let window_pct = s.window_pct().clamp(0, 100) as u16;
-        v.push(Section::Spacer);
-        v.push_metric(
-            Section::Metric {
-                label: "Rolling window (5h)".into(),
-                pct: window_pct,
-                severity: severity_for(s.window_pct()),
-                value_label: format!("{window_pct}%"),
-                footnote: format!(
-                    "{} / {} · {} remaining · reset {}",
-                    s.window_used,
-                    s.window_limit,
-                    s.window_remaining,
-                    countdown::format(s.window_reset_at, now)
-                ),
-            },
-            s.window_reset_at,
-        );
+        let w = window(s.window_pct(), s.window_reset_at, ROLLING_WINDOW);
+        push_window(&mut v, "Rolling window (5h)", &w, now, tol, false);
     }
+    let w = window(s.weekly_pct(), s.weekly_reset_at, WEEKLY_WINDOW);
+    push_window(&mut v, "Weekly quota", &w, now, tol, false);
 
     v
 }
@@ -1279,7 +1474,7 @@ fn push_window(
         format!("Resets in {}", reset_text)
     };
     sections.push(Section::Spacer);
-    sections.push_metric_with_pacing(
+    sections.push_metric_with_pacing_in_window(
         Section::Metric {
             label: label.into(),
             pct,
@@ -1289,6 +1484,7 @@ fn push_window(
         },
         w.resets_at,
         pacing.map(|p| p.elapsed_pct),
+        w.window_duration,
     );
 }
 
@@ -1506,7 +1702,7 @@ mod tests {
     use super::*;
     use crate::usage::{
         AnthropicSnapshot, Cents, ExtraUsage, KimiSnapshot, OpenAiCredits, OpenAiSnapshot,
-        OpenAiSource, OpenRouterSnapshot, UsageWindow, ZaiSnapshot,
+        OpenAiSource, OpenRouterSnapshot, ResetCredit, ResetCredits, UsageWindow, ZaiSnapshot,
     };
     use chrono::TimeZone;
 
@@ -1521,6 +1717,142 @@ mod tests {
             last_error: None,
             fetched_at: Some(now() - chrono::Duration::seconds(15)),
         }))
+    }
+
+    fn supergrok(period: crate::usage::SuperGrokPeriod) -> VendorSnapshot {
+        VendorSnapshot::SuperGrok(crate::usage::SuperGrokSnapshot {
+            plan: "SuperGrok".into(),
+            account: "digest".into(),
+            weekly_pct: 40,
+            period,
+            reset_at: Some(now() + chrono::Duration::days(2)),
+            prepaid_balance: None,
+            reset_credits: crate::usage::ResetCredits::default(),
+        })
+    }
+
+    fn only_metric(sections: &[SectionProjection]) -> &SectionProjection {
+        let mut metrics = sections
+            .iter()
+            .filter(|projection| matches!(projection.section, Section::Metric { .. }));
+        let metric = metrics.next().expect("one metric row");
+        assert!(metrics.next().is_none(), "expected exactly one metric row");
+        metric
+    }
+
+    /// Only a rolling window has a length a frontend can pace against. The
+    /// shared `UsageWindow` helper always knows it; SuperGrok knows it for a
+    /// week and not for a month, whose length varies.
+    #[test]
+    fn window_length_is_reported_only_when_exact() {
+        use crate::usage::SuperGrokPeriod;
+
+        let weekly =
+            sections_with_metadata_for(&ready(supergrok(SuperGrokPeriod::Weekly)), now(), 5);
+        assert_eq!(only_metric(&weekly).window, Some(chrono::Duration::days(7)));
+
+        let monthly =
+            sections_with_metadata_for(&ready(supergrok(SuperGrokPeriod::Monthly)), now(), 5);
+        assert_eq!(only_metric(&monthly).window, None);
+
+        let unknown =
+            sections_with_metadata_for(&ready(supergrok(SuperGrokPeriod::Unknown)), now(), 5);
+        assert_eq!(only_metric(&unknown).window, None);
+
+        let kimi = sections_with_metadata_for(
+            &ready(VendorSnapshot::Kimi(KimiSnapshot {
+                plan: None,
+                weekly_limit: 100,
+                weekly_used: 10,
+                weekly_remaining: 90,
+                weekly_reset_at: Some(now() + chrono::Duration::days(3)),
+                window_limit: 0,
+                window_used: 0,
+                window_remaining: 0,
+                window_reset_at: None,
+            })),
+            now(),
+            5,
+        );
+        assert_eq!(
+            only_metric(&kimi).window,
+            Some(crate::kimi::vendor::WEEKLY_WINDOW)
+        );
+    }
+
+    #[test]
+    fn cursor_pools_carry_the_billing_cycle_window_only_when_it_is_exact() {
+        let mut snap = cursor_snap();
+        snap.cycle_start = Some(now() - chrono::Duration::days(22));
+        let exact =
+            sections_with_metadata_for(&ready(VendorSnapshot::Cursor(snap.clone())), now(), 5);
+        let windows: Vec<_> = exact
+            .iter()
+            .filter(|p| matches!(p.section, Section::Metric { .. }))
+            .map(|p| p.window)
+            .collect();
+        assert_eq!(
+            windows,
+            vec![
+                Some(chrono::Duration::days(31)),
+                Some(chrono::Duration::days(31))
+            ]
+        );
+
+        // Without `billingCycleStart` the cycle length is unknown. Reporting a
+        // guessed month here would reach a frontend as an exact window and be
+        // paced as one; every pool goes out with no window instead. The reset
+        // time is unaffected.
+        snap.cycle_start = None;
+        let unknown = sections_with_metadata_for(&ready(VendorSnapshot::Cursor(snap)), now(), 5);
+        let pools: Vec<_> = unknown
+            .iter()
+            .filter(|p| matches!(p.section, Section::Metric { .. }))
+            .collect();
+        assert_eq!(pools.len(), 2);
+        assert!(
+            pools.iter().all(|p| p.window.is_none()),
+            "an unstated billing cycle must not report a window length"
+        );
+        assert!(
+            pools.iter().all(|p| p.reset_at.is_some()),
+            "the reset time still travels with the row"
+        );
+    }
+
+    #[test]
+    fn copilot_sections_carry_quota_reset_metadata() {
+        let reset_at = now() + chrono::Duration::days(4);
+        let snapshot = VendorSnapshot::Copilot(crate::copilot::types::Snapshot {
+            plan: "Pro".into(),
+            premium: Some(crate::copilot::types::Quota {
+                percent_remaining: 25,
+                entitlement: Some(300),
+                remaining: Some(75),
+                unlimited: false,
+            }),
+            chat: None,
+            completions: None,
+            reset_at: Some(reset_at),
+        });
+        let sections = sections_with_metadata_for(&ready(snapshot), now(), 5);
+        assert!(matches!(
+            &sections[0].section,
+            Section::Title { left, .. } if left == "GitHub Copilot Pro"
+        ));
+        let metric = sections
+            .iter()
+            .find(|projection| matches!(&projection.section, Section::Metric { .. }))
+            .expect("premium metric");
+        assert_eq!(metric.reset_at, Some(reset_at));
+        assert!(matches!(
+            &metric.section,
+            Section::Metric { label, pct, value_label, footnote, .. }
+                if label == "Premium requests"
+                    && *pct == 75
+                    && value_label == "75%"
+                    && footnote == "225 of 300 used"
+        ));
     }
 
     #[test]
@@ -1768,7 +2100,10 @@ mod tests {
             session: None,
             weekly: None,
             code_review: None,
+            additional_limits: Vec::new(),
+            unavailable_models: Vec::new(),
             credits: None,
+            reset_credits: ResetCredits::default(),
             source: OpenAiSource::CodexOauth,
         };
         let sections = sections_for(&ready(VendorSnapshot::Openai(snap)), now(), 5);
@@ -1789,7 +2124,7 @@ mod tests {
 
     #[test]
     fn error_state_includes_retry_hint() {
-        let sections = sections_for(&TabState::Error("token expired".into()), now(), 5);
+        let sections = sections_for(&TabState::error("token expired"), now(), 5);
         assert!(sections.iter().any(|s| matches!(
             s,
             Section::Text { value, .. } if value.contains("token expired")
@@ -1798,6 +2133,24 @@ mod tests {
             s,
             Section::Text { value, .. } if value.contains("`r` to retry")
         )));
+    }
+
+    #[test]
+    fn error_state_keeps_oauth_plan_as_title() {
+        let sections = sections_for(
+            &TabState::error_with_plan("HTTP 401", Some("Claude Max 5x".into())),
+            now(),
+            5,
+        );
+        assert!(matches!(
+            &sections[0],
+            Section::Title { left, .. } if left == "Claude Max 5x"
+        ));
+        assert!(sections.iter().any(|s| matches!(
+            s,
+            Section::Text { value, .. } if value.contains("HTTP 401")
+        )));
+        assert!(!sections.iter().any(|s| matches!(s, Section::Metric { .. })));
     }
 
     #[test]
@@ -1815,6 +2168,8 @@ mod tests {
                 window_duration: chrono::Duration::days(7),
             }),
             code_review: None,
+            additional_limits: Vec::new(),
+            unavailable_models: Vec::new(),
             credits: Some(OpenAiCredits {
                 balance: "$5.00".into(),
                 has_credits: true,
@@ -1822,6 +2177,7 @@ mod tests {
                 approx_local_messages: Some((100, 200)),
                 approx_cloud_messages: Some((30, 50)),
             }),
+            reset_credits: ResetCredits::default(),
             source: OpenAiSource::CodexOauth,
         };
         let sections = sections_for(&ready(VendorSnapshot::Openai(snap)), now(), 5);
@@ -1843,7 +2199,10 @@ mod tests {
                 window_duration: chrono::Duration::days(7),
             }),
             code_review: None,
+            additional_limits: Vec::new(),
+            unavailable_models: Vec::new(),
             credits: None,
+            reset_credits: ResetCredits::default(),
             source: OpenAiSource::CodexOauth,
         };
         let sections = sections_for(&ready(VendorSnapshot::Openai(snap)), now(), 5);
@@ -1854,6 +2213,110 @@ mod tests {
         assert!(!sections.iter().any(|section| matches!(
             section,
             Section::Metric { label, .. } if label == "Codex 5h"
+        )));
+    }
+
+    /// Both vendors reach every frontend through these sections — the TUI
+    /// panel, `usage --json`, and from there the Omarchy, GNOME and KDE
+    /// surfaces. One row, one wording, whichever provider banked the reset.
+    #[test]
+    fn banked_resets_reach_the_panel_for_both_providers() {
+        let now = now();
+        let credits = ResetCredits {
+            available: 2,
+            credits: vec![
+                ResetCredit {
+                    title: Some("Full reset (Weekly + 5 hr)".into()),
+                    expires_at: Some(now + chrono::Duration::days(13)),
+                },
+                ResetCredit {
+                    title: Some("Full reset (Weekly + 5 hr)".into()),
+                    expires_at: Some(now + chrono::Duration::days(13) + chrono::Duration::hours(6)),
+                },
+            ],
+        };
+        let codex = OpenAiSnapshot {
+            plan: "ChatGPT Plus".into(),
+            session: None,
+            weekly: None,
+            code_review: None,
+            additional_limits: Vec::new(),
+            unavailable_models: Vec::new(),
+            credits: None,
+            reset_credits: credits.clone(),
+            source: OpenAiSource::CodexOauth,
+        };
+        let supergrok = crate::usage::SuperGrokSnapshot {
+            plan: "SuperGrok".into(),
+            account: "scope".into(),
+            weekly_pct: 30,
+            period: crate::usage::SuperGrokPeriod::Weekly,
+            reset_at: Some(now + chrono::Duration::days(3)),
+            prepaid_balance: None,
+            reset_credits: credits,
+        };
+
+        for snapshot in [
+            VendorSnapshot::Openai(codex),
+            VendorSnapshot::SuperGrok(supergrok),
+        ] {
+            let sections = sections_for(&ready(snapshot), now, 5);
+            let body = sections.iter().find_map(|section| match section {
+                Section::Block { label, body } if label == "Reset credits" => Some(body.clone()),
+                _ => None,
+            });
+            let body = body.expect("reset credits block");
+            assert_eq!(body.len(), 2, "{body:?}");
+            assert!(
+                body.iter()
+                    .all(|line| line.contains("Full reset (Weekly + 5 hr)")),
+                "{body:?}"
+            );
+        }
+    }
+
+    /// The row is absent, not zeroed: an account that has never earned a reset
+    /// should not carry a permanent "0 resets available" line.
+    #[test]
+    fn a_provider_with_no_banked_resets_shows_no_reset_row() {
+        let snap = OpenAiSnapshot {
+            plan: "ChatGPT Plus".into(),
+            session: None,
+            weekly: None,
+            code_review: None,
+            additional_limits: Vec::new(),
+            unavailable_models: Vec::new(),
+            credits: None,
+            reset_credits: ResetCredits::default(),
+            source: OpenAiSource::CodexOauth,
+        };
+        let sections = sections_for(&ready(VendorSnapshot::Openai(snap)), now(), 5);
+        assert!(!sections.iter().any(|section| matches!(
+            section,
+            Section::Block { label, .. } if label == "Reset credits"
+        )));
+    }
+
+    #[test]
+    fn supergrok_does_not_repeat_the_window_reset_as_its_own_section() {
+        let now = now();
+        let snap = crate::usage::SuperGrokSnapshot {
+            plan: "SuperGrok".into(),
+            account: "scope".into(),
+            weekly_pct: 0,
+            period: crate::usage::SuperGrokPeriod::Weekly,
+            reset_at: Some(now + chrono::Duration::days(6)),
+            prepaid_balance: Some(0.0),
+            reset_credits: ResetCredits::default(),
+        };
+        let sections = sections_for(&ready(VendorSnapshot::SuperGrok(snap)), now, 5);
+        assert!(!sections.iter().any(|section| matches!(
+            section,
+            Section::Text { label, .. } if label == "Resets"
+        )));
+        assert!(sections.iter().any(|section| matches!(
+            section,
+            Section::Text { label, .. } if label == "Prepaid API"
         )));
     }
 
@@ -1901,25 +2364,53 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing metric {label}"))
         };
 
+        // The bar carries the percentage, so the footnote is the plain
+        // `Resets in …` every other window row shows — not the counters, which
+        // against Kimi's limit of 100 only restate the percentage.
         let (weekly_value, weekly_footnote) = find_footnote("Weekly quota");
         assert_eq!(weekly_value, "26%");
-        assert!(weekly_footnote.contains("26 / 100"));
-        assert!(weekly_footnote.contains("74 remaining"));
-        assert!(
-            weekly_footnote.contains("4d 0h"),
-            "weekly reset countdown: {weekly_footnote}"
-        );
-        assert!(!weekly_footnote.contains("2026-05-27T")); // not a raw RFC3339
+        assert_eq!(weekly_footnote, "Resets in 4d 0h");
 
         let (window_value, window_footnote) = find_footnote("Rolling window (5h)");
         assert_eq!(window_value, "15%");
-        assert!(window_footnote.contains("15 / 100"));
-        assert!(window_footnote.contains("85 remaining"));
-        assert!(
-            window_footnote.contains("2h 00m"),
-            "window reset countdown: {window_footnote}"
-        );
-        assert!(!window_footnote.contains("2026-05-23T14")); // not a raw RFC3339
+        assert_eq!(window_footnote, "Resets in 2h 00m");
+    }
+
+    /// Every vendor holding both a short and a long window opens on the short
+    /// one — Claude's `Session (5h)`, Codex's `Codex 5h`, GLM's `Session (5h)`,
+    /// OpenCode Go's `Rolling`. Kimi's rolling bucket is that window, so it
+    /// leads both projections this module feeds: the section list the Quattro
+    /// panel and the KDE plasmoid render in order, and the Overview's compact
+    /// cells.
+    #[test]
+    fn kimi_leads_with_the_rolling_window_like_every_other_two_window_vendor() {
+        let now = now();
+        let snap = KimiSnapshot {
+            plan: Some("LEVEL_INTERMEDIATE".into()),
+            weekly_limit: 100,
+            weekly_used: 26,
+            weekly_remaining: 74,
+            weekly_reset_at: Some(now + chrono::Duration::days(4)),
+            window_limit: 100,
+            window_used: 15,
+            window_remaining: 85,
+            window_reset_at: Some(now + chrono::Duration::hours(2)),
+        };
+        let sections = sections_for(&ready(VendorSnapshot::Kimi(snap.clone())), now, 5);
+        let labels: Vec<&str> = sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::Metric { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, ["Rolling window (5h)", "Weekly quota"]);
+
+        let (_, cells) = compact_cells(&VendorSnapshot::Kimi(snap), now, false, 5);
+        let labels: Vec<_> = cells.iter().map(|cell| cell.label.as_deref()).collect();
+        let values: Vec<_> = cells.iter().map(|cell| cell.value.as_str()).collect();
+        assert_eq!(labels, [Some("5h"), Some("wk")]);
+        assert_eq!(values, ["15%", "26%"]);
     }
 
     #[test]
@@ -1952,6 +2443,7 @@ mod tests {
             unlimited: false,
             on_demand_enabled: false,
             reset_at: Some(now() + chrono::Duration::days(9)),
+            cycle_start: None,
         }
     }
 
@@ -1984,7 +2476,7 @@ mod tests {
 
     #[test]
     fn terminal_controls_are_removed_from_detail_and_overview_fields() {
-        let error = TabState::Error("bad\x1b]52;c;Y2FuYXJ5\x07 value".into());
+        let error = TabState::error("bad\x1b]52;c;Y2FuYXJ5\x07 value");
         let sections = sections_for(&error, now(), 5);
         assert!(matches!(
             &sections[1],
@@ -2193,5 +2685,132 @@ mod tests {
             http,
             Some(("HTTP 503".into(), "service unavailable".into()))
         );
+    }
+
+    fn antigravity_snap(source: crate::usage::AntigravitySource) -> VendorSnapshot {
+        VendorSnapshot::Antigravity(crate::usage::AntigravitySnapshot {
+            plan: "Pro".into(),
+            account: "acct:test".into(),
+            source,
+            session: Some(UsageWindow {
+                utilization_pct: 43,
+                resets_at: Some(now() + chrono::Duration::hours(2)),
+                window_duration: chrono::Duration::hours(5),
+            }),
+            weekly: None,
+            third_party_session: None,
+            third_party_weekly: None,
+        })
+    }
+
+    /// Figures read off the API while nothing runs say so; a running product's
+    /// do not, since that is the normal case.
+    #[test]
+    fn antigravity_names_the_remote_source_and_only_that() {
+        use crate::usage::AntigravitySource;
+
+        let remote = sections_for(
+            &ready(antigravity_snap(AntigravitySource::Remote)),
+            now(),
+            5,
+        );
+        let n = remote.len();
+        assert!(matches!(remote[n - 2], Section::Spacer));
+        assert!(matches!(
+            &remote[n - 1],
+            Section::Text { label, value }
+                if label == "Source" && value == "Google API (app closed)"
+        ));
+
+        let local = sections_for(&ready(antigravity_snap(AntigravitySource::Local)), now(), 5);
+        assert!(
+            !local
+                .iter()
+                .any(|s| matches!(s, Section::Text { label, .. } if label == "Source"))
+        );
+    }
+
+    /// A custom provider's rows come out in declaration order: title, gauges,
+    /// then texts. Only a metric that states its window length carries one;
+    /// every metric's own `resets_at` rides along as reset metadata.
+    #[test]
+    fn custom_sections_follow_declaration_order_and_carry_reset_metadata() {
+        use crate::custom::types::{CustomMetric, CustomSnapshot, CustomText};
+
+        let session_reset = now() + chrono::Duration::hours(3);
+        let monthly_reset = now() + chrono::Duration::days(12);
+        let snapshot = VendorSnapshot::Custom(CustomSnapshot {
+            plan: Some("Team".into()),
+            metrics: vec![
+                CustomMetric {
+                    label: "Session".into(),
+                    pct: 40,
+                    footnote: "40 of 100".into(),
+                    resets_at: Some(session_reset),
+                    window_secs: Some(18_000),
+                },
+                CustomMetric {
+                    label: "Monthly".into(),
+                    pct: 120,
+                    footnote: String::new(),
+                    resets_at: Some(monthly_reset),
+                    window_secs: None,
+                },
+            ],
+            texts: vec![CustomText {
+                label: "Region".into(),
+                value: "eu".into(),
+            }],
+        });
+
+        let sections = sections_with_metadata_for(&ready(snapshot.clone()), now(), 5);
+        assert!(matches!(
+            &sections[0].section,
+            Section::Title { left, right } if left == "Team" && right.is_some()
+        ));
+        assert!(matches!(sections[1].section, Section::Spacer));
+        assert!(matches!(
+            &sections[2].section,
+            Section::Metric { label, pct, value_label, footnote, .. }
+                if label == "Session" && *pct == 40 && value_label == "40%" && footnote == "40 of 100"
+        ));
+        assert_eq!(sections[2].reset_at, Some(session_reset));
+        assert_eq!(sections[2].window, Some(chrono::Duration::hours(5)));
+        // An over-100 percentage is clamped for the gauge; no window is invented.
+        assert!(matches!(
+            &sections[3].section,
+            Section::Metric { label, pct, value_label, .. }
+                if label == "Monthly" && *pct == 100 && value_label == "100%"
+        ));
+        assert_eq!(sections[3].reset_at, Some(monthly_reset));
+        assert_eq!(sections[3].window, None);
+        assert!(matches!(sections[4].section, Section::Spacer));
+        assert!(matches!(
+            &sections[5].section,
+            Section::Text { label, value } if label == "Region" && value == "eu"
+        ));
+        assert_eq!(sections.len(), 6);
+
+        let (plan, cells) = compact_cells(&snapshot, now(), false, 5);
+        assert_eq!(plan, "Team");
+        assert_eq!(cells[0].label.as_deref(), Some("Session"));
+        assert_eq!(cells[0].value, "40%");
+        assert_eq!(cells[1].label.as_deref(), Some("Monthly"));
+        assert_eq!(cells[1].value, "120%");
+        assert_eq!(headline_pct(&snapshot), Some(40));
+
+        // No plan and no texts: an empty title, no trailing spacer, no bar.
+        let bare = VendorSnapshot::Custom(CustomSnapshot {
+            plan: None,
+            metrics: vec![],
+            texts: vec![],
+        });
+        let sections = sections_with_metadata_for(&ready(bare.clone()), now(), 5);
+        assert!(matches!(&sections[0].section, Section::Title { left, .. } if left.is_empty()));
+        assert_eq!(sections.len(), 2);
+        let (plan, cells) = compact_cells(&bare, now(), false, 5);
+        assert!(plan.is_empty());
+        assert!(cells.is_empty());
+        assert_eq!(headline_pct(&bare), None);
     }
 }

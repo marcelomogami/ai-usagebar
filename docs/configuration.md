@@ -5,15 +5,25 @@ Claude, Codex, Z.AI, and OpenRouter are enabled by default; other providers are
 opt-in. The commented example shows the defaults and provider-specific
 settings.
 
+Both binaries accept `--config <PATH>` to use an alternate file instead of the
+default location (`%APPDATA%\ai-usagebar\config.toml` on Windows). The file
+must already exist; loads and the Settings overlay then read and write that
+file for the whole process, so a test config never touches the real one:
+
+```bash
+ai-usagebar --vendor kimi --config ./config.test.toml --watch 5
+ai-usagebar-tui --config ./config.test.toml
+```
+
 ```toml
 [ui]
 # Which vendor the widget shows when --vendor is omitted, AND which tab
 # is selected when the TUI opens. Defaults to anthropic when not set.
 # Only a vendor that is enabled can be primary.
-# primary = "anthropic"   # anthropic | anthropic_api | openai | zai
-#                         # | openrouter | deepseek | kimi | kilo | novita
+# primary = "anthropic"   # anthropic | anthropic_api | openai | copilot
+#                         # | zai | openrouter | deepseek | kimi | kilo | novita
 #                         # | moonshot | grok | supergrok | antigravity | cursor
-#                         # | minimax | kiro
+#                         # | minimax | kiro | nous | opencode-go | commandcode
 
 [context]
 enabled = false           # opt in, then press c in ai-usagebar-tui
@@ -35,6 +45,10 @@ api_key_env = "ANTHROPIC_ADMIN_KEY"
 [openai]
 enabled = true
 # codex_auth_path = "/home/you/.codex/auth.json"
+
+[copilot]
+enabled = false           # opt in after `gh auth login --web`
+# Uses `gh auth token`; GITHUB_COPILOT_TOKEN is an optional explicit override.
 
 [zai]
 enabled = true
@@ -105,11 +119,15 @@ api_key_env = "XAI_MANAGEMENT_KEY"
 
 [supergrok]
 enabled = true             # disabled by default; enable once you've run `grok login`
-# No API key: billing comes from the official Grok Build ACP process.
+# No API key of its own: billing and banked resets use the `key` already in
+# its auth.json (read-only, sent in an Authorization header, never copied or
+# rewritten). Billing is Grok Build's documented HTTPS endpoint, or its ACP
+# process as fallback; remaining resets are a separate grok.com RPC.
 # Defaults to $GROK_HOME/bin/grok or ~/.grok/bin/grok. Override only when the
 # trusted official binary was installed elsewhere.
 # grok_binary = "/opt/grok/bin/grok"
-# Opaque cache-scope fingerprint inputs; neither file is parsed or copied.
+# Cache-scope fingerprint inputs. config.toml is read as opaque bytes only;
+# auth.json is also read for its billing `key`. Neither is copied or written.
 # auth_path = "/home/you/.grok/auth.json"
 # config_path = "/home/you/.grok/config.toml"
 
@@ -132,6 +150,19 @@ enabled = true             # disabled by default; enable once you've run `kiro-c
 For more than one OpenRouter key, see the
 [OpenRouter account guide](openrouter-accounts.md). The existing singular
 `[openrouter]` key remains the default account and needs no migration.
+
+### GitHub Copilot
+
+GitHub Copilot uses the OAuth login managed by the official GitHub CLI. Run
+`gh auth login --web`, then select **GitHub Copilot** under **Primary Provider**
+in the Omarchy settings form and save; this enables `[copilot]` and sets it as
+the primary provider. The normal fetch path runs only the fixed structured
+command `gh auth token`. ai-usagebar never parses GitHub CLI configuration or
+credential stores and never writes the OAuth token to its config or cache.
+
+`GITHUB_COPILOT_TOKEN` is an optional explicit environment override. It takes
+precedence over `gh auth token`, which can be useful for a managed runtime that
+provides its own short-lived token. Do not put that token in `config.toml`.
 
 For more than one Codex login, add `[[openai.accounts]]` — a label and that
 login's own `auth.json`, the same shape `[[anthropic.accounts]]` uses:

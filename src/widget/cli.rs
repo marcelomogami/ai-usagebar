@@ -23,7 +23,12 @@ Output modes:
     in a terminal Does The Right Thing.
   - --watch N: like --pretty but refreshes every N seconds, clearing the screen
     between ticks. Useful while iterating on `--format` or `--tooltip-format`.
-  - --json: force JSON output even when stdout is a TTY (for scripting)."
+  - --json: force JSON output even when stdout is a TTY (for scripting).
+  - --config PATH: read and write an alternate config file instead of the
+    default `%APPDATA%/ai-usagebar/config.toml` (Windows) or
+    `~/.config/ai-usagebar/config.toml`. Accepted in any position, before or
+    after the subcommand; the file must already exist, and Settings saves
+    write back to it."
 )]
 pub struct Cli {
     /// Which vendor to query. When omitted, reads `[ui] primary` from
@@ -116,7 +121,7 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub creds_path: Option<std::path::PathBuf>,
 
-    /// Select a named Claude or OpenRouter account from the matching
+    /// Select a named Claude, OpenRouter, or Codex (OpenAI) account from the matching
     /// `[[...accounts]]` config array. Without it, the vendor's default account
     /// and original cache path are unchanged. For Claude it conflicts with the
     /// lower-level `--creds-path` because both select a credential source.
@@ -145,6 +150,27 @@ pub enum Command {
 
     /// Quota and time-to-reset for every configured vendor and account.
     Usage {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Turn on vendors whose credentials already exist on this machine
+    /// (local files, keychains, saved keys, env vars; never the network).
+    Detect {
+        /// Re-check every vendor, not only the ones never seen before.
+        #[arg(long)]
+        all: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Every provider ai-usagebar knows: how each authenticates, whether it is
+    /// switched on, and whether this machine has the credential it needs.
+    /// Unlike `usage`, this lists the switched-off and the never-configured —
+    /// it contacts nothing and is the catalog a frontend lists providers from.
+    Vendors {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
@@ -281,6 +307,7 @@ pub enum Vendor {
     #[value(name = "anthropic_api")]
     AnthropicApi,
     Openai,
+    Copilot,
     Zai,
     Openrouter,
     Deepseek,
@@ -308,6 +335,7 @@ impl Vendor {
             Vendor::Anthropic => crate::vendor::VendorId::Anthropic,
             Vendor::AnthropicApi => crate::vendor::VendorId::AnthropicApi,
             Vendor::Openai => crate::vendor::VendorId::Openai,
+            Vendor::Copilot => crate::vendor::VendorId::Copilot,
             Vendor::Zai => crate::vendor::VendorId::Zai,
             Vendor::Openrouter => crate::vendor::VendorId::Openrouter,
             Vendor::Deepseek => crate::vendor::VendorId::Deepseek,
@@ -399,6 +427,7 @@ fn id_to_vendor(id: crate::vendor::VendorId) -> Vendor {
         crate::vendor::VendorId::Anthropic => Vendor::Anthropic,
         crate::vendor::VendorId::AnthropicApi => Vendor::AnthropicApi,
         crate::vendor::VendorId::Openai => Vendor::Openai,
+        crate::vendor::VendorId::Copilot => Vendor::Copilot,
         crate::vendor::VendorId::Zai => Vendor::Zai,
         crate::vendor::VendorId::Openrouter => Vendor::Openrouter,
         crate::vendor::VendorId::Deepseek => Vendor::Deepseek,
@@ -462,11 +491,36 @@ mod tests {
     }
 
     #[test]
+    fn detect_subcommand_parses_its_flags_and_takes_no_widget_flags() {
+        let bare = Cli::parse_from(["ai-usagebar", "detect"]);
+        assert!(matches!(
+            bare.command,
+            Some(Command::Detect {
+                all: false,
+                json: false
+            })
+        ));
+
+        let full = Cli::parse_from(["ai-usagebar", "detect", "--all", "--json"]);
+        assert!(matches!(
+            full.command,
+            Some(Command::Detect {
+                all: true,
+                json: true
+            })
+        ));
+
+        assert!(Cli::try_parse_from(["ai-usagebar", "--vendor", "kimi", "detect"]).is_err());
+    }
+
+    #[test]
     fn new_vendor_values_and_auth_commands_parse_exactly() {
         let nous = Cli::parse_from(["ai-usagebar", "--vendor", "nous"]);
         assert_eq!(nous.vendor, Some(Vendor::NousResearch));
         let opencode = Cli::parse_from(["ai-usagebar", "--vendor", "opencode-go"]);
         assert_eq!(opencode.vendor, Some(Vendor::OpenCodeGo));
+        let copilot = Cli::parse_from(["ai-usagebar", "--vendor", "copilot"]);
+        assert_eq!(copilot.vendor, Some(Vendor::Copilot));
         let login = Cli::parse_from(["ai-usagebar", "auth", "nous", "login"]);
         assert!(matches!(login.command, Some(Command::Auth { .. })));
     }

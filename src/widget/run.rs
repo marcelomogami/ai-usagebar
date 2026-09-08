@@ -13,6 +13,7 @@ use crate::anthropic_api;
 use crate::antigravity;
 use crate::cache::{Cache, DEFAULT_TTL};
 use crate::config::Config;
+use crate::copilot;
 use crate::cursor;
 use crate::deepseek;
 use crate::error::{AppError, Result};
@@ -146,6 +147,7 @@ async fn build_output(cli: &Cli) -> Result<WaybarOutput> {
         Vendor::AnthropicApi => anthropic_api_output(cli, &config).await,
         Vendor::Openrouter => openrouter_output(cli, &config).await,
         Vendor::Openai => openai_output(cli, &config).await,
+        Vendor::Copilot => copilot_output(cli, &config).await,
         Vendor::Zai => zai_output(cli, &config).await,
         Vendor::Deepseek => deepseek_output(cli, &config).await,
         Vendor::Kimi => kimi_output(cli, &config).await,
@@ -165,9 +167,14 @@ async fn build_output(cli: &Cli) -> Result<WaybarOutput> {
 }
 
 fn validate_vendor_options(cli: &Cli, vendor: Vendor) -> Result<()> {
-    if cli.account.is_some() && !matches!(vendor, Vendor::Anthropic | Vendor::Openrouter) {
+    if cli.account.is_some()
+        && !matches!(
+            vendor,
+            Vendor::Anthropic | Vendor::Openrouter | Vendor::Openai
+        )
+    {
         return Err(AppError::Other(
-            "--account is supported only for Claude and OpenRouter".into(),
+            "--account is supported only for Claude, OpenRouter, and Codex (OpenAI)".into(),
         ));
     }
     if cli.desktop && vendor != Vendor::Anthropic {
@@ -277,15 +284,22 @@ async fn commandcode_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> 
 }
 
 /// Antigravity authenticates through whichever local product is running (the
-/// 2.0 app, the `agy` CLI, or the IDE) — there is no API key to resolve.
-async fn antigravity_output(cli: &Cli, _config: &Config) -> Result<WaybarOutput> {
+/// 2.0 app, the `agy` CLI, or the IDE) — there is no API key to resolve. With
+/// none running, the Google session it saved is used instead; the config only
+/// supplies the OAuth client that session is refreshed with.
+async fn antigravity_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> {
     let client = http_client()?;
     let cache = vendor_cache(cli, "antigravity")?;
-    let outcome = match antigravity::fetch_snapshot(&client, &cache, DEFAULT_TTL).await {
-        Ok(o) => o,
-        Err(e) if e.is_transient() => return Ok(WaybarOutput::loading(cli.icon.as_deref())),
-        Err(e) => return Err(e),
-    };
+    let oauth = antigravity::cloud::OauthClient::from_config(
+        config.antigravity.oauth_client_id.as_deref(),
+        config.antigravity.oauth_client_secret.as_deref(),
+    );
+    let outcome =
+        match antigravity::fetch_snapshot(&client, &cache, DEFAULT_TTL, oauth.as_ref()).await {
+            Ok(o) => o,
+            Err(e) if e.is_transient() => return Ok(WaybarOutput::loading(cli.icon.as_deref())),
+            Err(e) => return Err(e),
+        };
 
     let theme = theme_from_cli(cli);
     let snap = outcome.snapshot.clone();
@@ -410,9 +424,9 @@ async fn grok_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> {
     ))
 }
 
-/// SuperGrok delegates auth and billing transport to the official Grok Build
-/// ACP process — no token or API key is parsed, cached, refreshed, or placed
-/// in an ACP message by ai-usagebar.
+/// SuperGrok reads billing over the CLI's documented HTTPS endpoint (or, as a
+/// fallback, its ACP process). The login's `key` is used only inside one
+/// outgoing Authorization header — never cached, refreshed, or written back.
 async fn supergrok_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> {
     let cache = vendor_cache(cli, "supergrok")?;
     let scope_paths = supergrok::scope::ScopePaths::with_overrides(
@@ -651,6 +665,30 @@ async fn openai_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> {
         &theme,
         &opts,
         chrono::Utc::now(),
+    ))
+}
+
+async fn copilot_output(cli: &Cli, config: &Config) -> Result<WaybarOutput> {
+    let token = config.copilot.resolve_token()?;
+    let client = http_client()?;
+    let cache = vendor_cache(cli, "copilot")?;
+    let endpoints = copilot::fetch::Endpoints::default();
+    let outcome =
+        match copilot::fetch_snapshot(&client, &token, &cache, &endpoints, DEFAULT_TTL).await {
+            Ok(outcome) => outcome,
+            Err(error) if error.is_transient() => {
+                return Ok(WaybarOutput::loading(cli.icon.as_deref()));
+            }
+            Err(error) => return Err(error),
+        };
+    let snapshot = outcome.snapshot.clone();
+    let vendor_outcome: VendorOutcome = outcome.into();
+    Ok(copilot::vendor::render(
+        &vendor_outcome,
+        &snapshot,
+        &theme_from_cli(cli),
+        &RenderOpts::from_cli(cli),
+        Utc::now(),
     ))
 }
 
@@ -935,6 +973,7 @@ fn fallback(err: &AppError, _cli: &Cli) -> WaybarOutput {
         AppError::Json(e) => format!("JSON error: {e}"),
         AppError::Toml(e) => format!("TOML error: {e}"),
         AppError::IoBare(e) => format!("I/O error: {e}"),
+        AppError::WithPlan { source, .. } => return fallback(source, _cli),
     };
     // Tooltips are Pango markup. Escape error text before serializing it so an
     // error cannot inject markup; serde still produces valid one-line JSON.
@@ -1256,6 +1295,7 @@ mod tests {
         assert!(validate_vendor_options(&cli, Vendor::Zai).is_err());
         assert!(validate_vendor_options(&cli, Vendor::Anthropic).is_ok());
         assert!(validate_vendor_options(&cli, Vendor::Openrouter).is_ok());
+        assert!(validate_vendor_options(&cli, Vendor::Openai).is_ok());
     }
 
     #[test]
