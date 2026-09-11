@@ -40,6 +40,9 @@ codebase.
 ## Reference guides
 
 - [Configuration](docs/configuration.md)
+- [Development guide](DEVELOPMENT.md)
+- [Windows build guide](docs/windows-build.md)
+- [Ollama Cloud integration](docs/ollama-setup.md)
 - [Claude accounts](docs/claude-accounts.md)
 - [Format placeholders](docs/format-placeholders.md)
 - [Provider endpoints and live tests](docs/vendor-endpoints.md)
@@ -129,13 +132,20 @@ Alternatively, apply the overlay when you want the package available as
 ### Omarchy Quattro
 
 The native plugin is a display frontend and does not bundle the
-`ai-usagebar` executable. Install the binary first, then add and enable the
-plugin:
+`ai-usagebar` executable. Both are needed, and they install through different
+managers — the binary is a system package, the plugin is per-user shell config
+under `~/.config/omarchy/plugins/` — so this is one paste rather than one
+command:
 
 ```bash
-omarchy pkg aur add ai-usagebar-bin
-omarchy plugin add https://github.com/akitaonrails/ai-usagebar.git --enable
+omarchy pkg aur add ai-usagebar-bin &&
+  omarchy plugin add https://github.com/akitaonrails/ai-usagebar.git --enable
 ```
+
+If you found the plugin through [plugins.omarchy.org](https://plugins.omarchy.org/plugin.html?id=akitaonrails.ai-usagebar),
+its **Install** button copies the `omarchy plugin add` line on its own. That
+installs the widget but not the binary it reads, and the bar will say
+`ai-usagebar is not installed` until you run the `omarchy pkg aur add` half too.
 
 Quattro enables its own `omarchy.agents` status widget by default. Disable it
 if you want AI Usage to be the only agent status item in the bar:
@@ -152,7 +162,10 @@ wheel to switch providers. In QML settings, turn off **Show usage value in the
 top bar** for an icon-only widget; the panel and tooltip keep the full details.
 Turn on **Show provider name in the top bar** to prefix the entry with the same
 three-letter code Waybar's `{vendor_short}` prints, so a bar cycling several
-providers says which one it is showing.
+providers says which one it is showing. Use **Top bar usage window** to pin the
+bar to one quota window — auto (highest), 5-hour, weekly, or monthly — instead
+of always showing the highest percent; the tooltip and panel hero echo the
+pinned value while panel rows and alert state still follow the highest quota.
 
 The source-built `ai-usagebar` AUR package can replace `ai-usagebar-bin` in
 the first command.
@@ -217,7 +230,7 @@ verifying their `.sha256`; all three live in the `[tray]` section of
 `config.toml` (`shortcut`, `refresh_minutes` = 1, 5 or 10; default 5;
 `updates`). See [windows/README.md](windows/README.md).
 
-![Windows tray icon in the notification area — a bar-chart-in-circle mark next to the clock](screenshots/windows-tray-icon.png)
+![Windows tray icon in the notification area — a bar-chart-in-circle mark beside the overflow chevron](screenshots/windows-tray-icon.png)
 
 Credentials are read from the Windows user profile rather than `$HOME`:
 `%USERPROFILE%\.claude\.credentials.json` (Anthropic) and
@@ -618,6 +631,10 @@ The widget reads the providers and accounts already enabled in
   widget; this applies immediately and preserves the full panel and tooltip.
 - QML settings can also show the provider's `{vendor_short}` code before that
   value (`cld 29%`). It is off by default and applies immediately.
+- QML settings can pin the bar to one quota window — auto (highest),
+  5-hour, weekly, or monthly — instead of always showing the highest
+  percent. The tooltip and panel hero echo the pinned value; panel rows
+  and alert state still follow the highest quota.
 - Right-click launches the TUI.
 - Middle-click or the mouse wheel switches providers.
 - The selected provider or named account is remembered across shell reloads
@@ -636,7 +653,7 @@ privileges, and does not overwrite user configuration.
 
 | Integration | Supported providers | Notes |
 |---|---|---|
-| [macOS menu bar](macos/README.md) | Claude, Codex, Z.AI, OpenRouter, DeepSeek, Kimi, Kilo, Novita, Moonshot, Grok (xAI), Anthropic API, Cursor, Google Antigravity | Thirteen providers. |
+| [macOS menu bar](macos/README.md) | All providers supported by the binary (`vendors --json`) | Rate-limit windows, monthly & video pools, balances, multiple accounts, Overview. |
 | [GNOME Shell](gnome-extension/README.md) | Claude, Codex, Z.AI, OpenRouter, DeepSeek, Google Antigravity | Antigravity's two quota pools appear as grouped rows. |
 | [KDE Plasma 6](kde-plasmoid/README.md) | Whatever `usage --json` reports | Provider tabs in the popup; vendor is per applet instance. |
 | [Windows tray](windows/README.md) | Whatever `usage --json` reports | NotifyIcon + WebView2 popover; left-click the tray icon. |
@@ -825,6 +842,9 @@ Native desktop coverage varies by integration. The
 reported metric, desktop selector, stability note, and live-test command.
 
 Run `make smoke` to check live response shapes.
+
+For Ollama Cloud setup (Bearer key from ollama.com/settings/keys), see the
+[Ollama integration guide](docs/ollama-setup.md).
 
 ## Format placeholders
 

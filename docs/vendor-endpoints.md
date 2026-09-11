@@ -22,11 +22,12 @@ defensive and includes opt-in live tests for catching response changes.
 | **SuperGrok** | `cli-chat-proxy.grok.com/v1/billing` with the Grok Build login's key, falling back to its `x.ai/billing` ACP extension; `grok.com` `ConsumerUiSvc/GetRemainingResets` for banked resets | Current weekly/monthly included-credit %, prepaid API balance, reset, banked resets + expiry | No — widget/TUI only |
 | **Anthropic API** | `api.anthropic.com/v1/organizations/cost_report` (Admin API; documented) | Month-to-date spend ($, excludes Priority Tier), optional spend-vs-limit % | No — widget/TUI only |
 | **Google Antigravity** | A loopback RPC on the local Antigravity product's own port, discovered from `/proc` (Linux), `lsof` (macOS), or the process/TCP tables (Windows). When no product is running: `POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` (fallback `cloudcode-pa.googleapis.com`) and `…:loadCodeAssist` for the plan, with the Google OAuth session Antigravity saved in the OS keyring, refreshed at `https://oauth2.googleapis.com/token` | Whichever quota windows the running product reports — Gemini and Claude/GPT pools, 5-hour and weekly | Yes |
-| **Cursor** | `cursor.com/api/usage-summary` (undocumented; the dashboard's own frontend) | Two included-usage pools this billing cycle — Cursor Models (Auto/Composer) % and Other Models (named/API) % — plus plan, reset, on-demand | Yes |
+| **Cursor** | `cursor.com/api/usage-summary` (undocumented; the dashboard's own frontend) | Two included-usage pools this billing cycle — Cursor Models (Auto/Composer) % and Other Models (named/API) % — plus plan, reset, and on-demand spend/limit when available | Yes |
 | **Kiro CLI** | `codewhisperer.<region>.amazonaws.com` `GetUsageLimits` (undocumented; the same call kiro-cli's own `/usage` slash command makes) | Single credit pool this cycle — used/limit/%, plan, reset | No — widget/TUI only |
 | **Nous Research** | `portal.nousresearch.com/api/oauth/account` (OAuth-authenticated Portal account response) | Subscription usage %, subscription credits, top-up/purchased credits, total usable credits, renewal | Yes |
 | **OpenCode Go** | `opencode.ai/zen/go/v1/usage` | Rolling, weekly, and monthly `percent` windows with absolute reset timestamps | Yes |
 | **Command Code** | `api.commandcode.ai` `/alpha/billing/credits` + `/alpha/billing/subscriptions` (undocumented; the same calls the official `commandcode` CLI's `/usage` makes) | 5-hour and weekly rolling spend windows ($ used of $ cap), plan, and remaining monthly credits | No — widget/TUI only |
+| **Ollama Cloud** | `ollama.com/api/usage` (undocumented; the same route the official ollama.com/settings page calls) | 5-hour session % and weekly %, per-model request counts, last-4-weeks activity cost, config-supplied plan label | No — widget/TUI only |
 
 
 ## Providers evaluated and not added
@@ -58,6 +59,7 @@ or stored, and no vendor asks the user to paste a session cookie.
 | MiniMax | The Token Plan route is official, but no formal response schema is published. |
 | Kiro CLI | `GetUsageLimits` is the same undocumented CodeWhisperer operation used by kiro-cli's `/usage` command. AWS SSO OIDC `CreateToken`, used for refresh, is documented. |
 | Command Code | Undocumented `/alpha/*` routes called by the official `commandcode` CLI. The `alpha` path segment is the vendor's own signal that these may move. Windows are read by name (`fiveHour`, `weekly`) rather than by position, and `windowLimits` is accepted both at the top level and beside the ledger, so the most likely reshuffles are already tolerated. |
+| Ollama Cloud | Undocumented, but the route the official settings page itself calls. Auth is a static Bearer key minted at ollama.com/settings/keys — unrelated to the CLI's Ed25519 registry key, which ai-usagebar never reads. `usage` is a fraction (0..1), not a percent; the parser clamps it to a bounded percent. |
 
 Codex's known five-hour and seven-day windows are matched by their reported
 duration, not by `primary_window` or `secondary_window` position. This handles

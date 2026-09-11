@@ -27,9 +27,16 @@ When cutting a new version (patch, minor, or major):
      to a shipped release with no removed line for the grep to find. It passed
      clean while the section was wrong.
 
-     `make test` now also enforces this without git: a guard test fails if any
-     changelog entry appears under two versions, or if one section repeats a
-     category heading. The manual comparison above stays because it is
+     **`make changelog-check` now does this comparison for you** — it diffs
+     every released section against its own tag and refuses a version file
+     that moved backwards, which is the other half of the same hazard (four
+     branches once came back reading 1.12.0 after v1.13.0 shipped). Run it
+     instead of composing the diff by hand; the manual form below is kept
+     because it documents what the script checks.
+
+     `make test` also enforces part of this without git: a guard test fails if
+     any changelog entry appears under two versions, or if one section repeats
+     a category heading. The manual comparison above stays because it is
      stronger for the newest section — the guard cannot tell a *reworded*
      entry from a new one — but the automated check is what catches a
      conflict resolution that quietly copies an entry into a published
@@ -58,6 +65,7 @@ When cutting a new version (patch, minor, or major):
    The committed files keep `sha256sums = SKIP`; CI pins the real hashes later.
 6. **Run gate before tagging**:
    ```
+   make changelog-check                        # released sections + version files intact
    make test                                   # cargo test + the desktop JS gate
    cargo clippy --all-targets -- -D warnings   # clean
    cargo machete                               # no unused deps
@@ -258,8 +266,13 @@ vendor's response shape drifts:
   auth file and pass the paths in; never touch the real ones.
 - `src/anthropic/keychain.rs` — macOS-only Keychain fallback when
   `~/.claude/.credentials.json` is absent (Claude Code on macOS stores
-  the OAuth blob in the login Keychain). Reads use `security(1)`; writes use
-  Security.framework so OAuth JSON never enters process arguments. Module-gated with
+  the OAuth blob in the login Keychain). Reads, deletes and normal-sized writes
+  use `security(1)`: the writer's code identity is what macOS stamps onto the item's
+  XARA partition list, so a native write left the item owned by
+  `cdhash:<ai-usagebar>` and made every `/usr/bin/security` read — ours and
+  Claude Code's — raise a Keychain dialog (#148). OAuth JSON still never enters
+  process arguments: the command goes to `security -i` on stdin. Only a blob
+  over that reader's line cap falls back to Security.framework. Module-gated with
   `#[cfg(target_os = "macos")]`; Linux build never compiles it.
 - `src/cache.rs` — atomic per-vendor cache writes + flock, plus the shared
   cross-platform path resolvers (`xdg_cache_dir`, `home_dir`). `home_dir`
