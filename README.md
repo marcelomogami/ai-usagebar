@@ -258,9 +258,10 @@ come from environment variables or `config.toml`.
 | Novita | API key (`NOVITA_API_KEY` env or `[novita] api_key` in config) | Set either. Opt-in. |
 | Moonshot | API key (`MOONSHOT_API_KEY` or config) | Opt in. Set region `cn` for CNY; `global` uses USD. |
 | Grok (xAI) | Management key | Opt in with `XAI_MANAGEMENT_KEY` or config. An inference key does not work. |
-| SuperGrok | Existing `grok login` (its `auth.json` key, or its ACP extension) | Opt in, install Grok Build, and run `grok login`. This reports subscription usage, not the Management API balance. |
+| SuperGrok | Existing `grok login` (its `auth.json` key, or its ACP extension) | Opt in, install Grok Build, and run `grok login`. This reports subscription usage — overall included credits plus per-product slices (Build, Chat, Imagine) — not the Management API balance. |
+| Grok Bot | Existing Grok Bot desktop sign-in (Linux) | Opt in, install the Grok Bot desktop app, and sign in to it once. This reports the app's weekly included-usage pool — not the Management API balance, and not the Grok Build subscription. Refreshed tokens stay in ai-usagebar's cache; the app's own file is never written. |
 | MiniMax | Token Plan subscription key | Opt in with `MINIMAX_API_KEY` or config. Choose the matching global or China region; pay-as-you-go keys do not work. |
-| Google Antigravity | Local Antigravity server, or the saved Google session | Opt in. With Antigravity or an interactive `agy` session running the quota comes from its local server; when both are closed ai-usagebar reads the Google OAuth session Antigravity saved in the OS keyring (`gemini` / `antigravity`) and asks the Cloud Code API directly, refreshing the token through Google when it expired. |
+| Google Antigravity | Local Antigravity server, or the saved Google session | Opt in. The desktop products provide quota through their local server. The `agy` CLI currently requires a CSRF token it does not publish, so ai-usagebar uses the Google OAuth session saved in the OS keyring or `~/.gemini/antigravity-cli/antigravity-oauth-token` and asks the Cloud Code API instead. The TUI labels this fallback `Google API`. The same fallback applies when no product is running. |
 | Cursor | Existing Cursor IDE or `cursor-agent` login | Opt in and sign in once. `cursor-agent` is the headless fallback. |
 | Kiro CLI | Existing kiro-cli login | Opt in and run `kiro-cli login` once. ai-usagebar refreshes the session when needed. |
 | Nous Research | OAuth device flow | Enable `[nous]`, click **Log in with Nous Research** in the Omarchy settings panel, or run `ai-usagebar auth nous login`. Credentials are kept in ai-usagebar's separate platform config directory (`~/.config/ai-usagebar/credentials.json` on Linux). |
@@ -334,8 +335,8 @@ rather than silently querying the wrong URL.
 ### Enabling a vendor
 
 `enabled = true` is what makes a vendor fetch. Anthropic API, GitHub Copilot,
-DeepSeek, Kimi, Kilo, Novita, Moonshot, Grok, SuperGrok, Antigravity, Cursor,
-MiniMax, and Kiro CLI all default to **disabled** so that existing
+DeepSeek, Kimi, Kilo, Novita, Moonshot, Grok, SuperGrok, Grok Bot, Antigravity,
+Cursor, MiniMax, and Kiro CLI all default to **disabled** so that existing
 installs are unaffected until you opt in. Use either method:
 
 - Use the gear or `s` in the Omarchy panel, or run
@@ -349,8 +350,8 @@ after signing in with GitHub CLI, selecting it as primary explicitly enables
 `[copilot]` at the same time.
 
 Vendors that authenticate through a local login rather than a key — Cursor,
-Kiro CLI, SuperGrok, Antigravity, and Kimi when you have a Kimi For Coding
-subscription — have no key to save, so enable them with `enabled = true` in
+Kiro CLI, SuperGrok, Grok Bot, Antigravity, and Kimi when you have a Kimi For
+Coding subscription — have no key to save, so enable them with `enabled = true` in
 `config.toml`.
 
 GitHub Copilot has no token field in the Omarchy or terminal Settings forms.
@@ -375,6 +376,7 @@ Declare it as a `[[custom]]` table in `config.toml`; the JSON is mapped with
 id = "mytool"                    # slug; the entry id becomes custom:mytool
 name = "My Tool"                 # header / tab label
 short_name = "myt"               # three lowercase letters, unique
+brand = "deepseek"               # optional built-in slug for supported UIs
 enabled = true
 url = "https://api.example.com/v1/usage"   # https unless allow_http = true
 api_key_env = "MYTOOL_API_KEY"   # env var first, inline api_key second
@@ -397,7 +399,9 @@ value = "/balance/display"
 ```
 
 Each metric renders as a meter with the usual severity colours; texts render
-as one-line rows. The cache under `<cache>/ai-usagebar/custom/<id>` holds the
+as one-line rows. `brand` lets supporting frontends, currently the Omarchy
+widget, draw a built-in vendor's mark for the custom entry; omit it to keep the
+`short_name` tag. The cache under `<cache>/ai-usagebar/custom/<id>` holds the
 projected snapshot (only the values the pointers selected, never the response
 body) with the same stale-while-revalidate rules as the built-in vendors, and
 an error names the failing pointer, never the response body or the key. The
@@ -430,9 +434,10 @@ For each API-key vendor, ai-usagebar checks in this order:
   caches, refreshes, or writes that key back. Auth/config files are also
   hashed as opaque bytes to separate caches between logins.
 - Cursor's `state.vscdb` and `cursor-agent` fallback `auth.json` are read-only.
-- Antigravity's keyring entry is read-only. A refreshed access token goes to
-  `antigravity/oauth.json` in the cache dir (mode `600` on Unix), keyed by a
-  fingerprint of the refresh token so a different login never reuses it.
+- Antigravity's keyring entry and CLI OAuth file are read-only. A refreshed
+  access token goes to `antigravity/oauth.json` in the cache dir (mode `600` on
+  Unix), keyed by a fingerprint of the refresh token so a different login
+  never reuses it.
   Renewing the session needs Antigravity's own OAuth client id and secret in
   `[antigravity] oauth_client_id` / `oauth_client_secret`; they are public
   installed-app credentials, but nothing secret-shaped ships in this
@@ -572,6 +577,10 @@ The JSON report has two views of each provider:
 - `sections` preserves the complete ordered display, including balances,
   grouped rows, and spacers. Rows without a percentage do not invent one.
 
+The top-level `schema_version` is currently `1`. Consumers should ignore
+unknown fields and treat absent fields as not applicable. The version changes
+only when a tolerant reader could not safely absorb a change.
+
 `usage` reports only the providers that are **enabled**, which makes the
 switched-off and the never-credentialed exactly the rows it cannot describe.
 `vendors --json` is the catalog that covers them: one row per provider with its
@@ -672,6 +681,10 @@ repositories and are maintained by their authors, not here.
 - [AI Usage for Noctalia](https://github.com/noctalia-dev/community-plugins/tree/main/ai-usagebar)
   — bar widget and panel for the Noctalia v5 shell, installable from its
   plugin browser as `felipeartur/ai-usagebar`.
+
+- [usage for Codex CLI](https://github.com/wellorbetter/ai-usagebar-codex-skill)
+  — Codex skill for checking remaining quotas, balances, and reset times with
+  `$usage`, using the usage and vendor JSON reports.
 
 ## Waybar config
 

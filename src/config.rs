@@ -9,6 +9,7 @@
 //! [openrouter] enabled = true
 //! [deepseek]   enabled = false
 //! [kimi]       enabled = false
+//! [grokbot]    enabled = false  # Grok Bot desktop app's own session (Linux)
 //! [[custom]]   id = "mytool"   # user-defined HTTP provider, static token
 //! ```
 //!
@@ -54,6 +55,7 @@ pub struct Config {
     pub moonshot: MoonshotConfig,
     pub grok: GrokConfig,
     pub supergrok: SuperGrokConfig,
+    pub grokbot: GrokbotConfig,
     pub antigravity: AntigravityConfig,
     pub cursor: CursorConfig,
     pub minimax: MinimaxConfig,
@@ -1156,6 +1158,23 @@ impl Default for SuperGrokConfig {
     }
 }
 
+/// Grok Bot — the desktop app's weekly included-usage pool, from its own
+/// Connect-RPC dashboard call. Distinct from `[grok]` (Management API prepaid
+/// dollars) and `[supergrok]` (Grok Build subscription). No API key: the
+/// credential is the app's own session in `sand-secrets.json` (read-only).
+/// Linux-only for now — other platforms fail closed at fetch time.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct GrokbotConfig {
+    /// Opt-in (defaults to `false`), like every vendor riding a local app's
+    /// session.
+    pub enabled: bool,
+    /// Override for the app's credential file (default
+    /// `~/.config/Grok Bot/sand-secrets.json`), mirroring `[cursor] db_path`
+    /// and `[kimi] credentials_path`.
+    pub secrets_path: Option<PathBuf>,
+}
+
 fn default_grok_binary() -> PathBuf {
     let executable = if cfg!(windows) { "grok.exe" } else { "grok" };
     let grok_home = std::env::var_os("GROK_HOME")
@@ -1167,8 +1186,8 @@ fn default_grok_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(executable))
 }
 
-/// Antigravity reads its quota from whichever local Antigravity product is
-/// running, so it needs no credentials of its own. When no product is up it
+/// Antigravity reads its quota from a usable local Antigravity product. When no
+/// product is up — or `agy` requires the CSRF token it does not publish — it
 /// falls back to the Google session Antigravity saved in the OS keyring and
 /// talks to Cloud Code directly. Renewing that session needs Antigravity's
 /// OAuth client id and secret, which are not shipped in source: set them here
@@ -1272,6 +1291,9 @@ pub struct CustomProviderConfig {
     /// Exactly three lowercase ASCII letters, unique across built-in vendors
     /// and other custom providers — it is the `{vendor_short}` bar tag.
     pub short_name: String,
+    /// A built-in vendor slug whose mark supporting frontends may use.
+    /// `None` preserves the custom provider's `short_name` tag.
+    pub brand: Option<String>,
     pub enabled: bool,
     /// `https://` unless `allow_http`; never carries `user:pass@`.
     pub url: String,
@@ -1301,6 +1323,7 @@ impl Default for CustomProviderConfig {
             id: String::new(),
             name: String::new(),
             short_name: String::new(),
+            brand: None,
             enabled: false,
             url: String::new(),
             allow_http: false,
@@ -1423,6 +1446,14 @@ impl CustomProviderConfig {
             return Err(bad(format!(
                 "short_name {:?} must be exactly 3 lowercase ASCII letters",
                 self.short_name
+            )));
+        }
+        if let Some(brand) = &self.brand
+            && !VendorId::all().iter().any(|v| v.slug() == brand)
+        {
+            return Err(bad(format!(
+                "brand {brand:?} must name a built-in vendor (it borrows that \
+                 vendor's mark); leave it unset to keep the short_name tag"
             )));
         }
         let url = reqwest::Url::parse(&self.url)
@@ -1674,6 +1705,7 @@ impl Config {
         expand_tilde_opt(&mut self.cursor.agent_auth_path);
         expand_tilde_opt(&mut self.kiro.db_path);
         expand_tilde_opt(&mut self.kimi.credentials_path);
+        expand_tilde_opt(&mut self.grokbot.secrets_path);
         self.supergrok.grok_binary = expand_tilde(&self.supergrok.grok_binary);
         expand_tilde_opt(&mut self.supergrok.auth_path);
         expand_tilde_opt(&mut self.supergrok.config_path);
@@ -1771,6 +1803,7 @@ impl Config {
             VendorId::Moonshot => self.moonshot.enabled,
             VendorId::Grok => self.grok.enabled,
             VendorId::Supergrok => self.supergrok.enabled,
+            VendorId::Grokbot => self.grokbot.enabled,
             VendorId::Antigravity => self.antigravity.enabled,
             VendorId::Cursor => self.cursor.enabled,
             VendorId::Minimax => self.minimax.enabled,
@@ -1808,6 +1841,7 @@ impl Config {
             | VendorId::Openai
             | VendorId::Copilot
             | VendorId::Supergrok
+            | VendorId::Grokbot
             | VendorId::Antigravity
             | VendorId::Cursor
             | VendorId::Kiro
@@ -1837,6 +1871,7 @@ impl Config {
             | VendorId::Openai
             | VendorId::Copilot
             | VendorId::Supergrok
+            | VendorId::Grokbot
             | VendorId::Antigravity
             | VendorId::Cursor
             | VendorId::Kiro
@@ -2243,6 +2278,7 @@ mod tests {
             VendorId::Moonshot,
             VendorId::Grok,
             VendorId::Supergrok,
+            VendorId::Grokbot,
             VendorId::Cursor,
             VendorId::Minimax,
             VendorId::Kiro,
@@ -2492,6 +2528,34 @@ enabled = false
             .unwrap();
         assert!(!path.starts_with("~"), "{}", path.display());
         assert!(path.ends_with("kimi/creds.json"), "{}", path.display());
+    }
+
+    #[test]
+    fn grokbot_is_opt_in_and_takes_no_api_key() {
+        let defaults = GrokbotConfig::default();
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.secrets_path, None);
+        // No key surface of any kind: the app's own session is the login.
+        let config = Config::default();
+        assert_eq!(config.api_key_env_for(VendorId::Grokbot), "");
+        assert_eq!(config.inline_api_key(VendorId::Grokbot), None);
+
+        let file = write_toml("[grokbot]\nenabled = true\n");
+        let config = Config::load_from(file.path()).unwrap();
+        assert!(config.is_enabled(VendorId::Grokbot));
+        assert!(config.enabled_vendors().contains(&VendorId::Grokbot));
+    }
+
+    #[test]
+    fn grokbot_secrets_path_expands_a_tilde() {
+        let file = write_toml("[grokbot]\nsecrets_path = \"~/gb/secrets.json\"\n");
+        let path = Config::load_from(file.path())
+            .unwrap()
+            .grokbot
+            .secrets_path
+            .unwrap();
+        assert!(!path.starts_with("~"), "{}", path.display());
+        assert!(path.ends_with("gb/secrets.json"), "{}", path.display());
     }
 
     #[test]
@@ -3779,6 +3843,10 @@ value = "/tier"
         assert_eq!(c.id, "mytool");
         assert_eq!(c.name, "My Tool");
         assert_eq!(c.short_name, "myt");
+        assert_eq!(
+            c.brand, None,
+            "a custom provider has no mark unless it asks"
+        );
         assert!(c.enabled);
         assert_eq!(c.url, "https://api.example.test/v1/usage");
         assert!(!c.allow_http);
@@ -3827,6 +3895,32 @@ value = "/tier"
         assert_eq!(c.cache_ttl_secs, 60);
         assert!(config.validate().is_ok());
         assert!(Config::default().custom.is_empty());
+    }
+
+    #[test]
+    fn custom_brand_names_a_builtin_vendor_and_nothing_else() {
+        let config = Config::load_from(
+            write_toml(&custom_with(
+                r#"short_name = "myt""#,
+                "short_name = \"myt\"\nbrand = \"opencode-go\"",
+            ))
+            .path(),
+        )
+        .unwrap();
+        assert_eq!(config.custom[0].brand.as_deref(), Some("opencode-go"));
+
+        // The mark is borrowed from a vendor, so only a vendor can name one.
+        // A free-form slug here would reach the frontend as artwork it does
+        // not ship and draw nothing at all.
+        for brand in ["opencode", "OpenCode-Go", "mytool", ""] {
+            assert_custom_rejected(
+                &custom_with(
+                    r#"short_name = "myt""#,
+                    &format!("short_name = \"myt\"\nbrand = {brand:?}"),
+                ),
+                "must name a built-in vendor",
+            );
+        }
     }
 
     #[test]

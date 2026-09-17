@@ -143,6 +143,7 @@ const raw = JSON.stringify({primary: 'openai', entries: [
     name: 'anthropic · work',
     display_name: 'Claude · work',
     short_name: 'cld',
+    brand: 'anthropic',
     plan: 'Claude Max 20x',
     status: 'ready',
     error: null,
@@ -168,6 +169,7 @@ assert.equal(parsed.ok, true);
 assert.equal(parsed.primary, 'openai');
 assert.equal(parsed.entries.length, 2);
 assert.equal(parsed.entries[0].stale, true);
+assert.equal(parsed.entries[0].brand, 'anthropic');
 assert.equal(parsed.entries[0].sections[1].reset_at, '2026-08-14T14:00:00Z');
 assert.equal(model.providerName(parsed.entries[0]), 'Claude · work');
 assert.equal(model.providerName(parsed.entries[1]), 'Codex');
@@ -273,6 +275,18 @@ assert.equal(model.brandIconFile({id: 'commandcode'}), '');
 assert.equal(model.brandIconFile({id: 'anthropic_api'}), 'anthropic.svg');
 assert.equal(model.brandIconFile({id: 'grok'}), model.brandIconFile({id: 'supergrok'}));
 
+// A custom provider carries no built-in slug, so the mark comes from the
+// `brand` the report relays. A second key for the same service is the same
+// product and must not read as a different one.
+assert.equal(model.brandIconFile({id: 'custom:oc-second', brand: 'opencode-go'}), 'opencode.svg');
+assert.equal(model.brandIconFile({id: 'custom:oc-second'}), '');
+// A brand the artwork does not cover degrades to the nerd-font tag rather
+// than to a blank mark, and so does an older binary's report.
+assert.equal(model.brandIconFile({id: 'custom:oc-second', brand: 'commandcode'}), '');
+assert.equal(model.brandIconFile({id: 'anthropic', brand: undefined}), 'claude.svg');
+// `brand` wins over the id: that is the whole point of declaring it.
+assert.equal(model.brandIconFile({id: 'anthropic', brand: 'openai'}), 'openai.svg');
+
 const slugs = [
   'anthropic', 'anthropic_api', 'openai', 'copilot', 'zai', 'openrouter',
   'deepseek', 'kimi', 'kilo', 'novita', 'moonshot', 'grok', 'supergrok',
@@ -350,6 +364,44 @@ assert.equal(model.formatReset('', Date.parse('2026-08-14T12:00:00Z')), '');
 assert.equal(model.formatReset('not-a-date', Date.parse('2026-08-14T12:00:00Z')), '');
 assert.equal(model.formatUpdated('2026-08-14T12:00:00Z', Date.parse('2026-08-14T12:03:00Z')), 'Updated 3m ago');
 assert.equal(model.metricDetail(parsed.entries[0].sections[1]), '60% elapsed · 31pts under');
+
+// Grouped sub-rows (SuperGrok's product slices) gain one heading row per
+// group and pass everything else through untouched.
+const supergrokSections = model.parseReport(JSON.stringify({entries: [{
+  id: 'supergrok', error: null,
+  sections: [
+    {type: 'spacer'},
+    {type: 'metric', label: 'Weekly usage', percent: 97, value: '97%', detail: '',
+     severity: 'critical', reset_at: '2026-09-20T13:26:44Z', window_secs: 604800},
+    {type: 'metric', label: 'Grok Build', percent: 94, value: '94%', detail: '',
+     severity: 'low', group: 'Breakdown'},
+    {type: 'metric', label: 'Grok Chat', percent: 3, value: '3%', detail: '',
+     severity: 'low', group: 'Breakdown'},
+    {type: 'text', label: 'Prepaid API', value: '$4.22'}
+  ]
+}]})).entries[0].sections;
+assert.equal(supergrokSections[1].group, '');
+assert.equal(supergrokSections[2].group, 'Breakdown');
+// Array.from/JSON round-trips bridge the vm realm, like every other
+// shape assertion in this file.
+assert.deepEqual(Array.from(model.groupedSections(supergrokSections)).map(row => {
+  if (row.type === 'spacer') return 'spacer';
+  if (row.type === 'text' && row.value === '') return 'heading:' + row.label;
+  return row.label;
+}), [
+  'spacer',
+  'Weekly usage',      // ungrouped metric: no heading inserted
+  'heading:Breakdown', // one heading before the group's first row…
+  'Grok Build',
+  'Grok Chat',         // …never a second one for the same group
+  'Prepaid API'
+]);
+assert.equal(model.groupedSections(supergrokSections).filter(row =>
+  row.type === 'metric' && row.group === 'Breakdown').length, 2);
+assert.deepEqual(JSON.parse(JSON.stringify(model.groupedSections([{type: 'spacer'}]))),
+  [{type: 'spacer'}]);
+assert.equal(model.groupedSections(null).length, 0);
+assert.equal(model.groupedSections('not-sections').length, 0);
 
 const balance = model.parseReport(JSON.stringify({entries: [{
   id: 'deepseek', error: null,

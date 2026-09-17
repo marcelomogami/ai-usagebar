@@ -348,7 +348,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
         12
     } else {
         idxs.iter()
-            .map(|&i| tab_label(&app.tabs_meta[i]).chars().count())
+            .map(|&i| crate::display::text_width(&tab_label(&app.tabs_meta[i])))
             .max()
             .unwrap_or(6)
             .clamp(6, 22)
@@ -357,7 +357,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     for &i in &idxs {
         let name = tab_label(&app.tabs_meta[i]);
-        let pad = name_w.saturating_sub(name.chars().count());
+        let pad = name_w.saturating_sub(crate::display::text_width(&name));
         let mut spans = vec![
             Span::styled(name, theme.text),
             theme.span(" ".repeat(pad + 2)),
@@ -366,7 +366,7 @@ fn draw_overview(f: &mut Frame, app: &App, area: Rect) {
             Some(TabState::Ready(r)) => {
                 let (plan, cells) = panels::compact_cells(&r.snapshot, now, show_pacing, 5);
                 if show_pacing {
-                    let plan_pad = 14usize.saturating_sub(plan.chars().count());
+                    let plan_pad = 14usize.saturating_sub(crate::display::text_width(&plan));
                     spans.push(theme.muted(format!("{plan}{}", " ".repeat(plan_pad))));
                     for (j, cell) in cells.iter().enumerate() {
                         if j > 0 {

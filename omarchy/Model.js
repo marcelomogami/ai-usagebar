@@ -54,7 +54,8 @@ function normalizeSection(raw) {
       detail: cleanText(raw.detail, 1000),
       severity: severity,
       reset_at: cleanText(raw.reset_at, 80),
-      window_secs: windowSecs
+      window_secs: windowSecs,
+      group: cleanText(raw.group, 80)
     }
   }
   if (type === "text") {
@@ -90,6 +91,7 @@ function normalizeEntry(raw) {
     display_name: cleanText(raw.display_name, 240),
     short_name: cleanText(raw.short_name, 24),
     icon: cleanText(raw.icon, 8).trim(),
+    brand: cleanText(raw.brand, 32).trim(),
     plan: cleanText(raw.plan, 240),
     status: error !== "" || raw.status === "error" ? "error" : "ready",
     error: error,
@@ -265,11 +267,20 @@ function anyAlarming(entries) {
   return false
 }
 
+// The mark an entry is drawn with. The report names the provider — its own
+// for a built-in, the one a `[[custom]]` provider borrowed through `brand` —
+// and this file owns the artwork, because each frontend ships its own. An
+// older binary sends no `brand`, so the id still resolves the built-ins.
+function brandIconFile(entry) {
+  var declared = cleanText(entry && entry.brand, 32).trim()
+  return brandFileFor(declared !== "" ? declared : baseProvider(entry && entry.id))
+}
+
 // Official brand marks shipped next to this file. A missing file falls back
 // to the nerd-font glyph from the Rust report — the table is asset lookup,
 // not a second copy of provider names.
-function brandIconFile(entry) {
-  switch (baseProvider(entry && entry.id)) {
+function brandFileFor(provider) {
+  switch (provider) {
     case "anthropic":
       return "claude.svg"
     case "anthropic_api":
@@ -515,6 +526,30 @@ function metricDetail(row) {
   detail = detail.replace(/^Resets in [^·]+\s*(?:·\s*)?/i, "")
   detail = detail.replace(/\s*·\s*reset\s+[^·]+$/i, "")
   return detail.trim()
+}
+
+// The report marks sub-rows with a group (SuperGrok's product slices under
+// "Breakdown"). Render each group as a heading row — an empty-value text row,
+// which DetailRow draws through its section-header path — followed by that
+// group's metrics, so slices read as a breakdown of the meter above them
+// instead of peers of it. Ungrouped sections pass through untouched, and a
+// group heading appears once no matter how many rows carry it.
+function groupedSections(sections) {
+  var rows = Array.isArray(sections) ? sections : []
+  var out = []
+  var seen = {}
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i]
+    if (row && row.type === "metric") {
+      var group = String(row.group || "")
+      if (group !== "" && !seen[group]) {
+        seen[group] = true
+        out.push({ type: "text", label: group, value: "" })
+      }
+    }
+    out.push(row)
+  }
+  return out
 }
 
 function errorMessage(value) {
