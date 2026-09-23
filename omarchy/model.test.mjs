@@ -85,6 +85,13 @@ assert.match(panelSource, /height:\s*visible\s*\?\s*childrenRect\.height\s*:\s*0
 assert.match(panelSource, /width:\s*implicitWidth/);
 assert.doesNotMatch(panelSource, /orientation:\s*ListView\.Horizontal/);
 assert.match(panelSource, /providerList\.forceLayout\(\)/);
+// The scroll content keeps a hairline of slack on both sides of the
+// Flickable's clip edge. The first provider tab is a bordered button, and at
+// fractional device scales (a 1.25 monitor scale) Qt drops the 1px left
+// border of a control that sits exactly on the clip boundary, so that tab
+// rendered with three borders. (#231)
+assert.match(panelSource, /Column\s*\{[\s\S]*?id:\s*column[\s\S]*?x:\s*Style\.spacing\.hairline/);
+assert.match(panelSource, /width:\s*panelFlick\.width\s*-\s*Style\.spacing\.hairline\s*\*\s*2/);
 assert.match(panelSource, /foreground:\s*root\.entryAlarming\s*\?\s*root\.urgent/);
 assert.doesNotMatch(panelSource, /BrandMark[\s\S]*foreground:\s*root\.alarming\s*\?/m);
 const brandMarkSource = fs.readFileSync(new URL('./BrandMark.qml', import.meta.url), 'utf8');
@@ -92,6 +99,7 @@ assert.match(brandMarkSource, /icons\/" \+ root\.brand/);
 assert.ok(fs.existsSync(new URL('./icons/claude.svg', import.meta.url)));
 assert.ok(fs.existsSync(new URL('./icons/openai.svg', import.meta.url)));
 assert.ok(fs.existsSync(new URL('./icons/grok.svg', import.meta.url)));
+assert.ok(fs.existsSync(new URL('./icons/grokbot.svg', import.meta.url)));
 assert.ok(fs.existsSync(new URL('./icons/copilot.svg', import.meta.url)));
 assert.match(panelSource, /function\s+persistSelection\s*\(/);
 assert.match(panelSource, /Model\.settingsWithOverrides\(root\.settings,\s*root\.moduleName,\s*values\)/);
@@ -268,12 +276,14 @@ assert.equal(model.brandIconFile({id: 'anthropic'}), 'claude.svg');
 assert.equal(model.brandIconFile({id: 'anthropic@work'}), 'claude.svg');
 assert.equal(model.brandIconFile({id: 'openai'}), 'openai.svg');
 assert.equal(model.brandIconFile({id: 'supergrok'}), 'grok.svg');
+assert.equal(model.brandIconFile({id: 'grokbot'}), 'grokbot.svg');
 assert.equal(model.brandIconFile({id: 'copilot'}), 'copilot.svg');
 assert.equal(model.brandIconFile({id: 'kimi'}), 'kimi.svg');
 assert.equal(model.brandIconFile({id: 'opencode-go'}), 'opencode.svg');
 assert.equal(model.brandIconFile({id: 'commandcode'}), '');
 assert.equal(model.brandIconFile({id: 'anthropic_api'}), 'anthropic.svg');
 assert.equal(model.brandIconFile({id: 'grok'}), model.brandIconFile({id: 'supergrok'}));
+assert.notEqual(model.brandIconFile({id: 'grokbot'}), model.brandIconFile({id: 'grok'}));
 
 // A custom provider carries no built-in slug, so the mark comes from the
 // `brand` the report relays. A second key for the same service is the same
@@ -289,7 +299,7 @@ assert.equal(model.brandIconFile({id: 'anthropic', brand: 'openai'}), 'openai.sv
 
 const slugs = [
   'anthropic', 'anthropic_api', 'openai', 'copilot', 'zai', 'openrouter',
-  'deepseek', 'kimi', 'kilo', 'novita', 'moonshot', 'grok', 'supergrok',
+  'deepseek', 'kimi', 'kilo', 'novita', 'moonshot', 'grok', 'supergrok', 'grokbot',
   'antigravity', 'cursor', 'minimax', 'kiro', 'nous', 'opencode-go', 'commandcode'
 ];
 const byMark = {};
@@ -408,11 +418,35 @@ const balance = model.parseReport(JSON.stringify({entries: [{
   sections: [{type: 'text', label: 'Balance', value: '$8.42'}]
 }]})).entries[0];
 assert.equal(model.headline(balance).text, '$8.42');
-const meteredBalance = model.parseReport(JSON.stringify({entries: [{
+// The metric names its own headline; the label plays no part. A metric that
+// says nothing is a percentage, which is what OpenRouter's "Credit balance" row
+// is — the old label check put its dollar figure on the bar and hid the percent.
+const metered = (headline) => model.parseReport(JSON.stringify({entries: [{
   id: 'openrouter', error: null,
-  sections: [{type: 'metric', label: 'Credit balance', percent: 25, value: '$75.00', detail: ''}]
+  sections: [Object.assign(
+    {type: 'metric', label: 'Credit balance', percent: 25, value: '$75.00', detail: ''},
+    headline === undefined ? {} : {headline: headline})]
 }]})).entries[0];
-assert.equal(model.headline(meteredBalance).text, '$75.00');
+assert.equal(model.headline(metered(undefined)).text, '25%');
+assert.equal(model.headline(metered('percent')).text, '25%');
+assert.equal(model.headline(metered('value')).text, '$75.00');
+// An unrecognized word is not a licence to invent a third rendering.
+assert.equal(model.headline(metered('dollars')).text, '25%');
+// A "value" headline with nothing to show falls back rather than blanking.
+const emptyValue = model.parseReport(JSON.stringify({entries: [{
+  id: 'deepseek', error: null,
+  sections: [{type: 'metric', label: 'Balance', percent: 60, value: '',
+              detail: '', headline: 'value'}]
+}]})).entries[0];
+assert.equal(model.headline(emptyValue).text, '60%');
+// A percent headline on a row whose label says "balance" is drawn as a percent.
+const meteredTank = model.parseReport(JSON.stringify({entries: [{
+  id: 'deepseek', error: null,
+  sections: [{type: 'metric', label: 'Balance', percent: 75, value: '$50.00',
+              detail: '$50.00 of $200.00 left (75% used)', headline: 'percent'}]
+}]})).entries[0];
+assert.equal(model.headline(meteredTank).text, '75%');
+assert.equal(model.headline(meteredTank).percent, 75);
 
 assert.equal(model.parseReport('{').ok, false);
 assert.equal(model.parseReport('{}').ok, false);

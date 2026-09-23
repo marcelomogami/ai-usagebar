@@ -9,6 +9,179 @@ Each release is also published at
 
 ## [Unreleased]
 
+## [1.22.0] — 2026-09-23
+
+### Added
+
+- **A tank for a prepaid balance.** DeepSeek, Kilo, Novita, Moonshot and
+  prepaid Grok report money remaining and no denominator, so their row was a
+  plain balance. `[vendor] display_limit` states the tank size, in the currency
+  that vendor already reports, and turns it into a consumed meter —
+  `(display_limit - balance) / display_limit`, clamped 0–100, so a balance over
+  the cap reads 0% used. It must be finite and greater than zero, there is no
+  default, and it is a fallback rather than an override: a vendor that states
+  its own limit keeps it, which is why `[openrouter]` has none.
+- **`[vendor] headline`.** Picks which number goes on the bar, `"amount"` or
+  `"percent"`; whichever is not the headline stays in the detail line. Balance
+  vendors default to `"amount"`, OpenRouter to `"percent"`. Setting
+  `display_limit` does not switch it, and `"percent"` with no limit from either
+  source leaves the amount on the bar. Report metrics carry the resolved choice
+  as a new `headline` field (`"percent"` or `"value"`).
+- **Alibaba Cloud Model Studio Token Plan** as an opt-in local-login vendor
+  (`[modelstudio]`). Reads the console session the official `bl` CLI stores
+  at `~/.bailian/config.json` after `bl auth login --console` (read-only;
+  `config_dir`/`BAILIAN_CONFIG_DIR` override the location), and reports the
+  plan's 5-hour and weekly windows through the same region×site console
+  gateway the CLI uses. Wire percentages are ratios in [0,1] and resets are
+  epoch milliseconds; an absent window is no-data (possibly unlimited), never
+  0%, and an out-of-range value is schema drift rather than a figure. The
+  vendor cache is scoped by a fingerprint of the access token — the token
+  itself never persists. (#147)
+
+- **OrcaRouter** as an opt-in API-key vendor (`[orcarouter]`,
+  `ORCAROUTER_API_KEY`). Reports the credit card from the one-api compatible
+  dashboard billing endpoints — cumulative spend (US cents on the wire,
+  rendered as exact dollars), total credit limit, remaining, and the key's
+  expiry when it has one. Unlimited-quota keys report the `100000000` sentinel
+  in the limit fields and render spend-only, never as a $100M wallet. Errors
+  that arrive as HTTP 200 with an OpenAI error envelope surface as failures,
+  not zeros. (#193)
+
+### Changed
+
+- **The Omarchy panel and KDE plasmoid read a metric's `headline` instead of
+  testing its label for "balance".** The label check put OpenRouter's dollar
+  figure on the bar and hid its real consumed percent; OpenRouter now shows the
+  percent by default.
+- **The tray popover honours `headline` too** (Windows and macOS). A balance
+  metered against `display_limit` with `headline = "amount"` shows the money
+  figure under its meter, with the percentage and the detail line in the hover
+  text; `"percent"` keeps the popover's used/left toggle.
+
+### Fixed
+
+- **Omarchy Quattro panel: the first provider tab keeps its left border at
+  fractional display scales.** The panel's scroll content sat flush against
+  the `Flickable`'s clip edge, so at a 125% monitor scale Qt snapped the
+  first tab's 1px border to a device pixel outside the clip and only that
+  strip was dropped — the tab rendered with three borders while every other
+  tab kept all four. The content now keeps a hairline of slack on both sides,
+  so no bordered control sits exactly on the clip boundary. (#231)
+
+## [1.21.1] — 2026-09-22
+
+### Fixed
+
+- **The Windows tray again embeds the real dashboard** instead of the
+  placeholder page. v1.21.0 shipped a stub popover: `build.rs`'s npm
+  availability probe called `npm` directly, which cannot spawn the Windows
+  `.cmd` shim, so the Vite build was silently skipped and the no-Node
+  placeholder was baked into the release binary. The probe now goes through
+  the same `cmd /C` wrapper the build itself uses, and CI plus the release
+  workflow fail loudly if any tray artifact ever embeds the placeholder
+  text again. (#229)
+
+## [1.21.0] — 2026-09-22
+
+### Added
+
+- **macOS WebView tray** (`ai-usagebar-tray`). Same OpenUsage-style popover as
+  Windows (WKWebView instead of WebView2), plus a compact usage-chart glyph in
+  the menu bar from starred metrics (at most two per provider).
+  `cargo build --release --bin ai-usagebar-tray`.
+- **macOS Grok Bot.** `[grokbot]` reads
+  `~/Library/Application Support/Grok Bot/sand-secrets.json` with the
+  Chromium OSCrypt key from the login Keychain item `Grok Bot Safe Storage`
+  / `Grok Bot Key` (1003 PBKDF2 rounds, the same scheme as Claude Desktop).
+  The Mac app stores `cursor-accounts` as a JSON string wrapping the object
+  Linux writes directly; both shapes parse. Windows still fails closed.
+  Omarchy and the Windows tray draw Grok Bot's own head-and-eyes logomark
+  (`grokbot.svg`) instead of sharing Grok's mark.
+- **About and Check for Updates** in the tray Options menu. macOS checks
+  GitHub and opens the release page; Windows still installs in place.
+  Settings rows that are not obvious (pacing, reset times, shortcut, and
+  the rest) show a short hint.
+
+### Fixed
+
+- **`usage --json`'s `primary` is now an entry id, not a bare vendor slug.**
+  With named accounts the entry ids carry account labels
+  (`anthropic@claude-me`), so a `primary` serialized straight from
+  `config.ui.primary` named an id no entry carried and every consumer
+  resolved the mismatch differently or not at all. The report resolves the
+  configured primary to the first entry of that vendor (the bare slug, or
+  the first `{slug}@…` account) before serializing; a primary naming a
+  vendor with no entries keeps the slug, and an unset primary stays absent.
+  Consumers can now treat `primary` as an entry id present in `entries`.
+
+- **A named Anthropic account keeps reading its own credential file** while
+  that file is there. `resolve_active_label` matches `~/.claude.json`'s
+  account marker, and two `CLAUDE_CONFIG_DIR` directories can hold the *same*
+  account — each with its own live login. Every fetch for such a label was
+  routed to `~/.claude/.credentials.json` on the assumption that
+  `account switch` had moved the credential into that default slot, so an
+  account whose own file was live and unread next to it reported "token
+  refresh failed; run `claude` to re-auth" from a slot the user never logs
+  into. The default slot is now used only when the account's own file really
+  is gone, which is what a switch leaves behind.
+
+- On macOS, a leftover `~/.claude/.credentials.json` no longer shadows Claude
+  Code's live Keychain item. That file-first read 400'd "Refresh token expired"
+  and the tray showed **Sign-in expired** while `claude` itself was still
+  logged in.
+
+- **Grok Bot live `usagePercent` and on-demand `enabled`.**
+  `GetSandUsageStatus` has been observed sending a fractional JSON number
+  (`19.150778`) and `onDemandSettings.enabled: null`. The parser rounds the
+  percent and treats null as off, so a real macOS session no longer dies as
+  schema drift.
+- **Stop probing sibling ports of a `missing CSRF` `agy`.** When the local
+  language server status RPC responds with missing CSRF, the remaining
+  listeners of that same process (such as the companion TLS port) are skipped
+  instead of probed. This eliminates the spurious `http: TLS handshake error:
+  remote error: tls: unrecognized name` diagnostics while still trying other
+  Antigravity products that are running.
+
+## [1.20.2] — 2026-09-19
+
+### Fixed
+
+- **`usage` exits 0 after printing a complete document.** Per-entry fetch or
+  auth failures stay inside each entry's `error` field instead of making the
+  command itself fail, so a script that captures `usage --json` still gets the
+  diagnosis when every account is broken. Non-zero remains only when the
+  document cannot be produced (missing or unreadable `--config`, unparseable
+  TOML, no vendors enabled, or a runtime/bootstrap failure). (#217)
+
+## [1.20.1] — 2026-09-18
+
+### Added
+
+- **Official Scoop manifest for the Windows release.**
+  `packaging/scoop/ai-usagebar.json` installs the release ZIP with all three
+  binaries and an "AI Usage" Start-menu shortcut for the tray, and a
+  `publish-scoop` job in the release workflow pushes the freshly pinned
+  manifest (version from the tag, hash recomputed from the published
+  `.sha256` sidecar) to the `akitaonrails/scoop-bucket` repo when
+  `SCOOP_BUCKET_TOKEN` is set. Proposal: #216.
+- **Reset-credit expiry tooltip on Windows.** The Codex and SuperGrok reset
+  credit row keeps its compact available-count badge and now reveals each
+  credit's expiry date and remaining time on hover or keyboard focus.
+
+### Changed
+
+- The Windows tray popover is 300 logical pixels wide for a more compact
+  footprint, including on scaled displays.
+
+### Fixed
+
+- The Windows tray popover remeasures its intrinsic content height whenever it
+  opens or receives updated data, instead of retaining a stale work-area-sized
+  window with empty space above the footer.
+- The Scoop manifest's `version` is bumped in lockstep with the release (the
+  new `verify-version` guard caught the never-published v1.20.0's stale
+  manifest before anything shipped; that tag remains unused).
+
 ## [1.19.0] — 2026-09-17
 
 ### Added
@@ -2527,7 +2700,12 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.19.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.22.0...HEAD
+[1.22.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.21.1...v1.22.0
+[1.21.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.21.0...v1.21.1
+[1.21.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.20.2...v1.21.0
+[1.20.2]: https://github.com/akitaonrails/ai-usagebar/compare/v1.20.1...v1.20.2
+[1.20.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.19.0...v1.20.1
 [1.19.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.18.1...v1.19.0
 [1.18.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.18.0...v1.18.1
 [1.18.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.17.1...v1.18.0

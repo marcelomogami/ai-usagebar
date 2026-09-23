@@ -173,6 +173,10 @@ function normalizeSection(raw) {
             percent: percent,
             elapsedPercent: optionalPercent(raw.elapsed_percent),
             detail: safeText(raw.detail, 400),
+            // Which number the panel draws. Anything but an explicit 'value' —
+            // including a report old enough not to carry the field — leaves it
+            // a percentage.
+            headline: raw.headline === 'value' ? 'value' : 'percent',
             resetAt: safeText(raw.reset_at, 64),
             severity: severityOf(percent, raw.severity),
         };
@@ -318,8 +322,10 @@ function toRing(ring) {
 // ---------------------------------------------------------------------------
 
 // The worst metric, which is what the panel shows when it has room for one
-// number. A balance-style row reports money rather than a percentage, so it
-// contributes its own value text instead.
+// number. Each metric names which of its two numbers belongs on the panel —
+// `headline: 'percent'` or `'value'` — and the other one stays in the detail.
+// Reading that beats guessing from the label, which put OpenRouter's dollar
+// figure on the panel and hid its consumed percent.
 export function headline(entry) {
     if (!entry)
         return {text: '', percent: null, severity: 'low', label: ''};
@@ -328,9 +334,10 @@ export function headline(entry) {
         if (s.type === 'metric' && s.percent !== null && (!best || s.percent > best.percent))
             best = s;
     if (best) {
-        const isBalance = /balance/i.test(best.label) && best.value !== '';
+        // An older report omits the field; a metric is a percentage by default.
+        const showsValue = best.headline === 'value' && best.value !== '';
         return {
-            text: isBalance ? best.value : `${best.percent}%`,
+            text: showsValue ? best.value : `${best.percent}%`,
             percent: best.percent,
             severity: best.severity,
             label: best.label,

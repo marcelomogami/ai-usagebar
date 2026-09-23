@@ -138,9 +138,8 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
 
-      # The menu bar app is a single Swift file with no Xcode project. Build it
-      # to prove it still compiles, then run the pure-logic test harness
-      # (arc geometry, TOML enabled parsing, vendor balance dispatch).
+      # Legacy Swift menu (NSMenu). The product UI is `ai-usagebar-tray`
+      # (WKWebView popover), compiled by clippy --all-targets above.
       - name: Build the menu bar app
         run: swiftc -O -parse-as-library -o /tmp/ai-usagebar-menubar macos/ai-usagebar-menubar.swift
 
@@ -169,8 +168,16 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
 
-      - name: Test GNOME marker logic
-        run: node gnome-extension/marker-logic.test.mjs
+      # Same guard as the release workflow: a debug tray embedding the
+      # no-npm stub here means the npm probe or the Vite build broke (#229).
+      - name: "Guard: tray must embed the dashboard, not the stub"
+        shell: pwsh
+        run: |
+          $exe = 'target/debug/ai-usagebar-tray.exe'
+          if (Select-String -Path $exe -Pattern 'popover dist missing' -Quiet) {
+            Write-Host "::error::$exe embeds the placeholder popover — build.rs took the no-npm stub path (#229)"
+            exit 1
+          }
 
       - name: Test KDE plasmoid logic
         run: node kde-plasmoid/plasmoid-logic.test.mjs

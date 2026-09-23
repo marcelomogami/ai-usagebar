@@ -9,7 +9,8 @@
 //! [openrouter] enabled = true
 //! [deepseek]   enabled = false
 //! [kimi]       enabled = false
-//! [grokbot]    enabled = false  # Grok Bot desktop app's own session (Linux)
+//! [grokbot]    enabled = false  # Grok Bot desktop app's own session
+//! [modelstudio] enabled = false # `bl` CLI's own console login (Token Plan)
 //! [[custom]]   id = "mytool"   # user-defined HTTP provider, static token
 //! ```
 //!
@@ -26,6 +27,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use serde::{Deserialize, Serialize};
 
 use crate::anthropic::creds::CredsTarget;
+use crate::balance::{DisplayPrefs, Headline};
 use crate::cache::Cache;
 use crate::error::{AppError, Result};
 use crate::vendor::VendorId;
@@ -65,6 +67,8 @@ pub struct Config {
     pub opencode_go: OpenCodeGoConfig,
     pub commandcode: CommandCodeConfig,
     pub ollama: OllamaConfig,
+    pub orcarouter: OrcaRouterConfig,
+    pub modelstudio: ModelStudioConfig,
     /// User-defined providers, one `[[custom]]` table each.
     pub custom: Vec<CustomProviderConfig>,
 }
@@ -364,22 +368,47 @@ impl AnthropicConfig {
 
     /// The pure half of [`account_target`](AnthropicConfig::account_target),
     /// with "which account the `claude` CLI is signed into" injected — the same
-    /// shape as `Cli::resolve_vendor_with`.
+    /// shape as `Cli::resolve_vendor_with`. Probes the account's own credential
+    /// file with [`Path::exists`]; [`account_target_probing`] takes that probe
+    /// as an argument.
     ///
-    /// When `label` *is* the live CLI login, its credential has been moved into
-    /// the default slot and removed from its named slot. Reading the default
-    /// one keeps exactly one live lineage, so a refresh here cannot invalidate
-    /// the credential `claude` is using (or the other way round). The cache directory
-    /// is unchanged either way, so the tab keeps its identity and its cached
-    /// usage across a switch.
+    /// [`account_target_probing`]: AnthropicConfig::account_target_probing
     pub fn account_target_with(
         &self,
         label: &str,
         cli_active: Option<&str>,
     ) -> Result<(CredsTarget, Cache)> {
+        self.account_target_probing(label, cli_active, |path| path.exists())
+    }
+
+    /// The pure core: `exists` answers whether the account's own credential
+    /// file is there.
+    ///
+    /// When `label` *is* the live CLI login, `account switch` has moved its
+    /// credential into the default slot **and removed it from the named
+    /// one** — so reading the default keeps exactly one live lineage, and a
+    /// refresh here cannot invalidate the credential `claude` is using (or the
+    /// other way round). That only holds while the named slot really is empty,
+    /// which is why it is probed rather than assumed: a `CLAUDE_CONFIG_DIR`
+    /// layout keeps a live credential in every directory, and two of those
+    /// directories can hold the *same* account, which is what
+    /// `resolve_active_label` matches on. Believing the marker there sent every
+    /// fetch for that label to `~/.claude/.credentials.json` — a slot the user
+    /// never logs into, whose refresh token had expired, so a working account
+    /// reported "run `claude` to re-auth" while its own file sat live and
+    /// unread next to it.
+    ///
+    /// The cache directory is unchanged either way, so the tab keeps its
+    /// identity and its cached usage across a switch.
+    pub fn account_target_probing(
+        &self,
+        label: &str,
+        cli_active: Option<&str>,
+        exists: impl Fn(&Path) -> bool,
+    ) -> Result<(CredsTarget, Cache)> {
         let account = self.account(label)?;
         let cache = Cache::for_vendor_account("anthropic", label)?;
-        if cli_active == Some(label) {
+        if cli_active == Some(label) && !exists(&account.credentials_path) {
             return Ok((
                 CredsTarget::Default(crate::anthropic::creds::default_path()?),
                 cache,
@@ -814,12 +843,23 @@ pub struct OpenCodeGoConfig {
 
 /// Command Code reads the OAuth credential from the official CLI or pi, so it
 /// has no API key of its own. `auth_paths` overrides that search list for a
-/// non-standard install.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+/// non-standard install. It is enabled by default, like OpenAI/Codex; when no
+/// local credential exists the TUI reports that tab as unavailable instead of
+/// silently hiding the provider.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CommandCodeConfig {
     pub enabled: bool,
     pub auth_paths: Option<Vec<PathBuf>>,
+}
+
+impl Default for CommandCodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auth_paths: None,
+        }
+    }
 }
 
 /// Ollama Cloud (`ollama.com/api/usage`). Disabled by default: the local
@@ -846,6 +886,43 @@ impl Default for OllamaConfig {
             plan: "pro".to_string(),
         }
     }
+}
+
+/// OrcaRouter (`api.orcarouter.ai/v1/dashboard/billing/*`, one-api
+/// compatible). Opt-in like DeepSeek/Kilo: needs an explicit API key.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct OrcaRouterConfig {
+    pub enabled: bool,
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+}
+
+impl Default for OrcaRouterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key_env: "ORCAROUTER_API_KEY".to_string(),
+            api_key: None,
+        }
+    }
+}
+
+/// Alibaba Cloud Model Studio (Token Plan) — a local-login vendor, like
+/// Grok Bot: the credential is the official `bl` CLI's own console-login file
+/// (`~/.bailian/config.json`, read-only; AK/SK refresh is out of scope).
+/// No API key exists, so there is no `api_key_env`. The `BAILIAN_CONFIG_DIR`
+/// environment variable overrides the directory at runtime; `config_dir`
+/// here overrides it in config, and wins.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ModelStudioConfig {
+    /// Opt-in (defaults to `false`), like every vendor riding a local CLI's
+    /// session.
+    pub enabled: bool,
+    /// Override for the `bl` CLI's config directory (default `~/.bailian`),
+    /// mirroring `[grokbot] secrets_path`.
+    pub config_dir: Option<PathBuf>,
 }
 
 impl Default for OpenCodeGoConfig {
@@ -895,6 +972,18 @@ pub struct OpenRouterConfig {
     pub show_default_account: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
+    /// Which number goes on the bar. OpenRouter states its own denominator —
+    /// credits purchased — so it is a quota vendor and defaults to `percent`.
+    /// See [`DisplayPrefs`].
+    ///
+    /// There is deliberately **no** `display_limit` here. A setting that is
+    /// accepted and then always ignored is a footgun, and the one case where it
+    /// would not be ignored — a free-tier account whose `total_credits` is 0 —
+    /// is the case where honouring it would be wrong: the percentage on the bar
+    /// comes from `OpenRouterSnapshot::consumed_pct`, which is 0 without
+    /// credits, so a tank would name the headline `percent` and then show 0%
+    /// for an account with money in it.
+    pub headline: Headline,
 }
 
 impl Default for OpenRouterConfig {
@@ -905,6 +994,7 @@ impl Default for OpenRouterConfig {
             show_default_account: true,
             api_key_env: "OPENROUTER_API_KEY".to_string(),
             api_key: None,
+            headline: Headline::Percent,
         }
     }
 }
@@ -968,6 +1058,11 @@ pub struct DeepseekConfig {
     pub enabled: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
+    /// Tank size in the currency `/user/balance` reports, so the remaining
+    /// balance can be drawn as a meter. See [`DisplayPrefs`].
+    pub display_limit: Option<f64>,
+    /// Which number goes on the bar. See [`DisplayPrefs`].
+    pub headline: Headline,
 }
 
 impl Default for DeepseekConfig {
@@ -976,6 +1071,8 @@ impl Default for DeepseekConfig {
             enabled: false,
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
             api_key: None,
+            display_limit: None,
+            headline: Headline::Amount,
         }
     }
 }
@@ -1020,6 +1117,11 @@ pub struct KiloConfig {
     /// Optional Kilo organization id — scopes the balance to a team via the
     /// `x-kilocode-organizationid` header. Omit for the personal balance.
     pub organization_id: Option<String>,
+    /// Tank size in USD, so the remaining balance can be drawn as a meter.
+    /// See [`DisplayPrefs`].
+    pub display_limit: Option<f64>,
+    /// Which number goes on the bar. See [`DisplayPrefs`].
+    pub headline: Headline,
 }
 
 impl Default for KiloConfig {
@@ -1031,6 +1133,8 @@ impl Default for KiloConfig {
             api_key_env: "KILO_API_KEY".to_string(),
             api_key: None,
             organization_id: None,
+            display_limit: None,
+            headline: Headline::Amount,
         }
     }
 }
@@ -1041,6 +1145,12 @@ pub struct NovitaConfig {
     pub enabled: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
+    /// Tank size in USD, so the available balance can be drawn as a meter.
+    /// Novita's `credit_limit` is a credit line, not a spend cap, so it is not
+    /// a denominator. See [`DisplayPrefs`].
+    pub display_limit: Option<f64>,
+    /// Which number goes on the bar. See [`DisplayPrefs`].
+    pub headline: Headline,
 }
 
 impl Default for NovitaConfig {
@@ -1050,6 +1160,8 @@ impl Default for NovitaConfig {
             enabled: false,
             api_key_env: "NOVITA_API_KEY".to_string(),
             api_key: None,
+            display_limit: None,
+            headline: Headline::Amount,
         }
     }
 }
@@ -1088,6 +1200,11 @@ pub struct MoonshotConfig {
     pub api_key: Option<String>,
     /// `"global"` → api.moonshot.ai (USD); `"cn"` → api.moonshot.cn (CNY).
     pub region: String,
+    /// Tank size in the currency the chosen region reports — USD for `global`,
+    /// CNY for `cn`. See [`DisplayPrefs`].
+    pub display_limit: Option<f64>,
+    /// Which number goes on the bar. See [`DisplayPrefs`].
+    pub headline: Headline,
 }
 
 impl Default for MoonshotConfig {
@@ -1098,6 +1215,8 @@ impl Default for MoonshotConfig {
             api_key_env: "MOONSHOT_API_KEY".to_string(),
             api_key: None,
             region: "global".to_string(),
+            display_limit: None,
+            headline: Headline::Amount,
         }
     }
 }
@@ -1112,6 +1231,10 @@ pub struct GrokConfig {
     /// Optional team id. When absent, it's auto-resolved from the management
     /// key via `/auth/management-keys/validation`.
     pub team_id: Option<String>,
+    /// Tank size in USD for the prepaid credit balance. See [`DisplayPrefs`].
+    pub display_limit: Option<f64>,
+    /// Which number goes on the bar. See [`DisplayPrefs`].
+    pub headline: Headline,
 }
 
 impl Default for GrokConfig {
@@ -1122,6 +1245,8 @@ impl Default for GrokConfig {
             api_key_env: "XAI_MANAGEMENT_KEY".to_string(),
             api_key: None,
             team_id: None,
+            display_limit: None,
+            headline: Headline::Amount,
         }
     }
 }
@@ -1162,7 +1287,7 @@ impl Default for SuperGrokConfig {
 /// Connect-RPC dashboard call. Distinct from `[grok]` (Management API prepaid
 /// dollars) and `[supergrok]` (Grok Build subscription). No API key: the
 /// credential is the app's own session in `sand-secrets.json` (read-only).
-/// Linux-only for now — other platforms fail closed at fetch time.
+/// Linux and macOS; Windows fails closed at fetch time.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct GrokbotConfig {
@@ -1170,8 +1295,9 @@ pub struct GrokbotConfig {
     /// session.
     pub enabled: bool,
     /// Override for the app's credential file (default
-    /// `~/.config/Grok Bot/sand-secrets.json`), mirroring `[cursor] db_path`
-    /// and `[kimi] credentials_path`.
+    /// `~/.config/Grok Bot/sand-secrets.json` on Linux,
+    /// `~/Library/Application Support/Grok Bot/sand-secrets.json` on macOS),
+    /// mirroring `[cursor] db_path` and `[kimi] credentials_path`.
     pub secrets_path: Option<PathBuf>,
 }
 
@@ -1706,6 +1832,7 @@ impl Config {
         expand_tilde_opt(&mut self.kiro.db_path);
         expand_tilde_opt(&mut self.kimi.credentials_path);
         expand_tilde_opt(&mut self.grokbot.secrets_path);
+        expand_tilde_opt(&mut self.modelstudio.config_dir);
         self.supergrok.grok_binary = expand_tilde(&self.supergrok.grok_binary);
         expand_tilde_opt(&mut self.supergrok.auth_path);
         expand_tilde_opt(&mut self.supergrok.config_path);
@@ -1734,6 +1861,7 @@ impl Config {
             self.grok.api_key.as_deref(),
             self.anthropic_api.api_key.as_deref(),
             self.opencode_go.api_key.as_deref(),
+            self.orcarouter.api_key.as_deref(),
             self.antigravity.oauth_client_secret.as_deref(),
         ]
         .into_iter()
@@ -1812,6 +1940,8 @@ impl Config {
             VendorId::OpenCodeGo => self.opencode_go.enabled,
             VendorId::CommandCode => self.commandcode.enabled,
             VendorId::Ollama => self.ollama.enabled,
+            VendorId::OrcaRouter => self.orcarouter.enabled,
+            VendorId::ModelStudio => self.modelstudio.enabled,
         }
     }
 
@@ -1835,6 +1965,7 @@ impl Config {
             VendorId::Minimax => &self.minimax.api_key_env,
             VendorId::OpenCodeGo => &self.opencode_go.api_key_env,
             VendorId::Ollama => &self.ollama.api_key_env,
+            VendorId::OrcaRouter => &self.orcarouter.api_key_env,
             // Fixed names: OAuth-first providers whose environment override is
             // not user-renameable, and the providers with no key at all.
             VendorId::Anthropic
@@ -1846,7 +1977,8 @@ impl Config {
             | VendorId::Cursor
             | VendorId::Kiro
             | VendorId::NousResearch
-            | VendorId::CommandCode => id.api_key_env(),
+            | VendorId::CommandCode
+            | VendorId::ModelStudio => id.api_key_env(),
         }
     }
 
@@ -1867,6 +1999,7 @@ impl Config {
             VendorId::Minimax => self.minimax.api_key.as_deref(),
             VendorId::OpenCodeGo => self.opencode_go.api_key.as_deref(),
             VendorId::Ollama => self.ollama.api_key.as_deref(),
+            VendorId::OrcaRouter => self.orcarouter.api_key.as_deref(),
             VendorId::Anthropic
             | VendorId::Openai
             | VendorId::Copilot
@@ -1876,9 +2009,34 @@ impl Config {
             | VendorId::Cursor
             | VendorId::Kiro
             | VendorId::NousResearch
-            | VendorId::CommandCode => None,
+            | VendorId::CommandCode
+            | VendorId::ModelStudio => None,
         };
         raw.filter(|key| !key.is_empty())
+    }
+
+    /// Bar-number settings for one vendor.
+    ///
+    /// Only the prepaid-balance vendors declare these; everything else keeps
+    /// the quota shape ([`DisplayPrefs::default`]) and is unaffected.
+    pub fn display_prefs(&self, vendor: VendorId) -> DisplayPrefs {
+        match vendor {
+            VendorId::Deepseek => {
+                DisplayPrefs::balance(self.deepseek.display_limit, self.deepseek.headline)
+            }
+            VendorId::Kilo => DisplayPrefs::balance(self.kilo.display_limit, self.kilo.headline),
+            VendorId::Novita => {
+                DisplayPrefs::balance(self.novita.display_limit, self.novita.headline)
+            }
+            VendorId::Moonshot => {
+                DisplayPrefs::balance(self.moonshot.display_limit, self.moonshot.headline)
+            }
+            VendorId::Grok => DisplayPrefs::balance(self.grok.display_limit, self.grok.headline),
+            // No tank: OpenRouter reports its own credits. See
+            // [`OpenRouterConfig::headline`].
+            VendorId::Openrouter => DisplayPrefs::balance(None, self.openrouter.headline),
+            _ => DisplayPrefs::default(),
+        }
     }
 
     pub fn enabled_vendors(&self) -> Vec<VendorId> {
@@ -1925,6 +2083,25 @@ impl Config {
                  remove it to show spend without a limit"
                     .into(),
             ));
+        }
+        // Same rule as `monthly_limit` above: a tank size that cannot divide is
+        // a typo, and silently ignoring it would draw a meter the user never
+        // asked for — or none, with no diagnostic either way.
+        for (section, limit) in [
+            ("deepseek", self.deepseek.display_limit),
+            ("kilo", self.kilo.display_limit),
+            ("novita", self.novita.display_limit),
+            ("moonshot", self.moonshot.display_limit),
+            ("grok", self.grok.display_limit),
+        ] {
+            if let Some(limit) = limit
+                && (!limit.is_finite() || limit <= 0.0)
+            {
+                return Err(AppError::Other(format!(
+                    "[{section}] display_limit must be finite and greater than zero; \
+                     remove it to show the balance without a limit"
+                )));
+            }
         }
         if crate::kimi::oauth::Region::parse(&self.kimi.region).is_none()
             && !self.kimi.region.eq_ignore_ascii_case("auto")
@@ -2262,12 +2439,13 @@ mod tests {
     }
 
     #[test]
-    fn defaults_enable_only_the_four_core_vendors() {
+    fn defaults_enable_only_the_five_core_vendors() {
         let c = Config::default();
         assert!(c.is_enabled(VendorId::Anthropic));
         assert!(c.is_enabled(VendorId::Openai));
         assert!(c.is_enabled(VendorId::Zai));
         assert!(c.is_enabled(VendorId::Openrouter));
+        assert!(c.is_enabled(VendorId::CommandCode));
         for opt_in in [
             VendorId::AnthropicApi,
             VendorId::Copilot,
@@ -2282,10 +2460,12 @@ mod tests {
             VendorId::Cursor,
             VendorId::Minimax,
             VendorId::Kiro,
+            VendorId::OrcaRouter,
+            VendorId::ModelStudio,
         ] {
             assert!(!c.is_enabled(opt_in), "{opt_in:?}");
         }
-        assert_eq!(c.enabled_vendors().len(), 4);
+        assert_eq!(c.enabled_vendors().len(), 5);
     }
 
     #[test]
@@ -2480,6 +2660,128 @@ enabled = false
     }
 
     #[test]
+    fn display_limit_must_be_positive_and_finite_on_every_balance_vendor() {
+        // `[openrouter]` is absent on purpose: it has no `display_limit`.
+        for section in ["deepseek", "kilo", "novita", "moonshot", "grok"] {
+            for value in ["0", "-1", "inf", "nan"] {
+                let file = write_toml(&format!("[{section}]\ndisplay_limit = {value}\n"));
+                let error = Config::load_from(file.path()).unwrap_err().to_string();
+                assert!(
+                    error.contains(&format!("[{section}] display_limit")),
+                    "{section} = {value}: {error}"
+                );
+            }
+            let file = write_toml(&format!("[{section}]\ndisplay_limit = 200\n"));
+            let config = Config::load_from(file.path()).unwrap();
+            assert_eq!(
+                config.display_prefs(vendor_of(section)).display_limit,
+                Some(200.0),
+                "{section}"
+            );
+        }
+    }
+
+    /// No baked-in tank: a vendor nobody configured has no denominator.
+    #[test]
+    fn display_limit_is_absent_until_the_user_states_one() {
+        let config = Config::default();
+        for vendor in VendorId::all() {
+            assert_eq!(
+                config.display_prefs(*vendor).display_limit,
+                None,
+                "{vendor:?}"
+            );
+        }
+    }
+
+    /// A balance vendor headlines its money; a vendor with a denominator of its
+    /// own headlines the percentage. Everything else keeps the quota default.
+    #[test]
+    fn the_default_headline_follows_the_kind_of_vendor() {
+        let config = Config::default();
+        for vendor in [
+            VendorId::Deepseek,
+            VendorId::Kilo,
+            VendorId::Novita,
+            VendorId::Moonshot,
+            VendorId::Grok,
+        ] {
+            assert_eq!(
+                config.display_prefs(vendor).headline,
+                Headline::Amount,
+                "{vendor:?}"
+            );
+        }
+        assert_eq!(
+            config.display_prefs(VendorId::Openrouter).headline,
+            Headline::Percent
+        );
+        assert_eq!(
+            config.display_prefs(VendorId::Anthropic),
+            DisplayPrefs::default()
+        );
+    }
+
+    #[test]
+    fn the_headline_is_configurable_per_vendor_and_a_typo_is_loud() {
+        let file = write_toml("[deepseek]\nheadline = \"percent\"\n");
+        assert_eq!(
+            Config::load_from(file.path())
+                .unwrap()
+                .display_prefs(VendorId::Deepseek)
+                .headline,
+            Headline::Percent
+        );
+
+        let file = write_toml("[openrouter]\nheadline = \"amount\"\n");
+        assert_eq!(
+            Config::load_from(file.path())
+                .unwrap()
+                .display_prefs(VendorId::Openrouter)
+                .headline,
+            Headline::Amount
+        );
+
+        let file = write_toml("[deepseek]\nheadline = \"dollars\"\n");
+        let error = Config::load_from(file.path()).unwrap_err().to_string();
+        assert!(error.contains("headline"), "{error}");
+    }
+
+    /// `[openrouter]` has no tank at all. The API reports credits purchased, so
+    /// there is nothing to fall back to — and in the one case where a tank
+    /// would not be ignored (a free-tier account with `total_credits == 0`)
+    /// honouring it would put "0%" on the bar for an account with money in it,
+    /// because the percentage comes from the snapshot, not from the tank.
+    #[test]
+    fn openrouter_has_no_display_limit_to_be_ignored() {
+        let file = write_toml("[openrouter]\ndisplay_limit = 200\nheadline = \"percent\"\n");
+        let config = Config::load_from(file.path()).unwrap();
+        let prefs = config.display_prefs(VendorId::Openrouter);
+        assert_eq!(prefs.display_limit, None);
+        assert_eq!(prefs.headline, Headline::Percent);
+    }
+
+    /// Setting a tank does not move the money off the bar by itself; the two
+    /// are independent choices.
+    #[test]
+    fn a_display_limit_alone_leaves_the_headline_where_it_was() {
+        let file = write_toml("[deepseek]\ndisplay_limit = 200\n");
+        let prefs = Config::load_from(file.path())
+            .unwrap()
+            .display_prefs(VendorId::Deepseek);
+        assert_eq!(prefs.display_limit, Some(200.0));
+        assert_eq!(prefs.headline, Headline::Amount);
+    }
+
+    fn vendor_of(section: &str) -> VendorId {
+        VendorId::all()
+            .iter()
+            .copied()
+            .find(|vendor| vendor.config_section() == section)
+            .unwrap_or_else(|| panic!("no vendor for [{section}]"))
+    }
+
+    #[test]
     fn minimax_region_accepts_only_known_instances() {
         for region in ["global", "GLOBAL", "cn", "CN"] {
             let file = write_toml(&format!("[minimax]\nregion = {region:?}\n"));
@@ -2556,6 +2858,34 @@ enabled = false
             .unwrap();
         assert!(!path.starts_with("~"), "{}", path.display());
         assert!(path.ends_with("gb/secrets.json"), "{}", path.display());
+    }
+
+    #[test]
+    fn modelstudio_is_opt_in_and_takes_no_api_key() {
+        let defaults = ModelStudioConfig::default();
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.config_dir, None);
+        // No key surface of any kind: the bl CLI's console session is the login.
+        let config = Config::default();
+        assert_eq!(config.api_key_env_for(VendorId::ModelStudio), "");
+        assert_eq!(config.inline_api_key(VendorId::ModelStudio), None);
+
+        let file = write_toml("[modelstudio]\nenabled = true\n");
+        let config = Config::load_from(file.path()).unwrap();
+        assert!(config.is_enabled(VendorId::ModelStudio));
+        assert!(config.enabled_vendors().contains(&VendorId::ModelStudio));
+    }
+
+    #[test]
+    fn modelstudio_config_dir_expands_a_tilde() {
+        let file = write_toml("[modelstudio]\nconfig_dir = \"~/bl\"\n");
+        let path = Config::load_from(file.path())
+            .unwrap()
+            .modelstudio
+            .config_dir
+            .unwrap();
+        assert!(!path.starts_with("~"), "{}", path.display());
+        assert!(path.ends_with("bl"), "{}", path.display());
     }
 
     #[test]
@@ -3086,6 +3416,7 @@ enabled = false
                 VendorId::Openai,
                 VendorId::Zai,
                 VendorId::Openrouter,
+                VendorId::CommandCode,
             ]
         );
     }
@@ -3252,6 +3583,7 @@ enabled = false
                 VendorId::Openrouter,
                 VendorId::Deepseek,
                 VendorId::Kimi,
+                VendorId::CommandCode,
             ]
         );
     }
@@ -3481,6 +3813,58 @@ enabled = false
         // The cache must not move, or a switch would silently orphan the tab's
         // usage history and show "Loading…" until the next fetch.
         assert_eq!(idle_cache.dir(), live_cache.dir());
+    }
+
+    #[test]
+    fn the_live_cli_account_keeps_its_own_slot_while_that_file_is_there() {
+        // Two CLAUDE_CONFIG_DIRs can hold the same account, and each keeps its
+        // own live credential — `resolve_active_label` matches the account, not
+        // the lineage. Reading the default slot then hands back a credential
+        // the user never logs into.
+        let cfg = AnthropicConfig {
+            accounts: vec![AnthropicAccount {
+                label: "personal".into(),
+                credentials_path: "/tmp/accounts/personal/.credentials.json".into(),
+            }],
+            ..Default::default()
+        };
+
+        let (present, _) = cfg
+            .account_target_probing("personal", Some("personal"), |_| true)
+            .unwrap();
+        assert!(
+            matches!(&present, CredsTarget::Named { path, .. }
+                if path == Path::new("/tmp/accounts/personal/.credentials.json")),
+            "{present:?}"
+        );
+
+        // Emptied by `account switch`: the credential really did move.
+        let (moved, _) = cfg
+            .account_target_probing("personal", Some("personal"), |_| false)
+            .unwrap();
+        assert!(matches!(moved, CredsTarget::Default(_)), "{moved:?}");
+    }
+
+    #[test]
+    fn the_live_cli_accounts_own_file_is_probed_on_disk() {
+        // `account_target_probing` proves the decision; only the entry point
+        // proves that the shipping caller probes at all. Fails on main, where
+        // the live label is routed to the default slot unconditionally.
+        let creds = NamedTempFile::new().unwrap();
+        let cfg = AnthropicConfig {
+            accounts: vec![AnthropicAccount {
+                label: "personal".into(),
+                credentials_path: creds.path().to_path_buf(),
+            }],
+            ..Default::default()
+        };
+        let (target, _) = cfg
+            .account_target_with("personal", Some("personal"))
+            .unwrap();
+        assert!(
+            matches!(&target, CredsTarget::Named { path, .. } if path == creds.path()),
+            "read {target:?} instead of the account's own file"
+        );
     }
 
     #[test]

@@ -39,24 +39,46 @@ import {
   resetText,
   resetAlternate,
   formatResetExact,
+  formatResetCreditDate,
+  resetCreditDetails,
   condensedTextRowIndexes,
   providerIconId,
   initialsGlyph,
   metricCount,
   sendCommand,
   resolvedTheme,
-  applyDensity,
   emptyPayload,
   pace,
   paceText,
   paceTickPercent,
   paceVisible,
+  prettyMetricLabel,
   shortcutFromKeyEvent,
+  defaultStars,
+  toggleStar,
+  isStarred,
+  seedStars,
+  stripCommand,
+  MAX_STARS_PER_PROVIDER,
+  expirySeverity,
+  providerLinks,
+  isHttpUrl,
   formatAgo,
   updateStatusLabel,
   updateBannerPending,
   updateModeLabel,
 } from './src/model.js';
+import { measurePanelHeight } from './src/panel-size.js';
+
+// The native window can retain a tall viewport while WebView2 is hidden. Its
+// stretched scroll region must not become the next requested panel height.
+const intrinsicContent = { offsetHeight: 420, scrollHeight: 510 };
+const stretchedScroller = { dataset: { scroll: '' }, offsetHeight: 900 };
+const footerChrome = { dataset: {}, offsetHeight: 44 };
+assert.equal(measurePanelHeight({
+  children: [stretchedScroller, footerChrome],
+  querySelector: () => intrinsicContent,
+}), 554);
 
 const report = {
   version: '1.10.0',
@@ -266,6 +288,56 @@ const [resetsFolded, resetsKept] = projectCards(withResets, 0);
 assert.equal(resetsFolded.rows.map((r) => r.kind).join(','), 'metric');
 assert.equal(resetsKept.rows.map((r) => r.label).join(','), 'Balance,Resets');
 
+// Banked resets stay structured through normalization so the dashboard can
+// keep the compact count in the card and put every expiry in its tooltip.
+const bankedResets = parseHostPayload({
+  entries: [{
+    id: 'openai',
+    display_name: 'Codex',
+    reset_credits: {
+      available: 3,
+      credits: [
+        { title: 'Full reset', expires_at: '2026-10-05T04:18:00Z' },
+        { title: 'Full reset', expires_at: '2026-09-20T23:58:00Z' },
+      ],
+    },
+    sections: [{ type: 'block', label: 'Reset credits', body: ['legacy text'] }],
+  }],
+});
+assert.equal(bankedResets.entries[0].resetCredits.available, 3);
+assert.equal(bankedResets.entries[0].resetCredits.credits[0].expiresAt, '2026-10-05T04:18:00Z');
+const resetRow = projectCards(bankedResets, Date.parse('2026-09-15T10:00:00Z'))[0].rows[0];
+assert.equal(resetRow.kind, 'resetCredits');
+assert.equal(resetRow.label, 'Rate Limit Resets');
+assert.equal(resetRow.available, 3);
+
+const resetDetails = resetCreditDetails(resetRow, Date.parse('2026-09-15T10:00:00Z'), {
+  locale: 'en-US',
+  timeZone: 'UTC',
+  timeFormat: '24',
+});
+assert.deepEqual(resetDetails.items.map((item) => item.date), [
+  'Sep 20 at 23:58',
+  'Oct 5 at 04:18',
+  'Date unavailable',
+]);
+assert.deepEqual(resetDetails.items.map((item) => item.remaining), ['5d 13h', '19d 18h', '—']);
+assert.equal(resetDetails.hidden, 0);
+assert.equal(
+  formatResetCreditDate('2026-09-20T23:58:00Z', { locale: 'en-US', timeZone: 'UTC', timeFormat: '12' }),
+  'Sep 20 at 11:58 PM',
+);
+
+// Older hosts do not send `reset_credits`; their existing text block remains visible.
+const legacyResetCard = projectCards(parseHostPayload({
+  entries: [{
+    id: 'openai',
+    display_name: 'Codex',
+    sections: [{ type: 'block', label: 'Reset credits', body: ['2 resets available'] }],
+  }],
+}), 0)[0];
+assert.equal(legacyResetCard.rows[0].kind, 'block');
+
 const extraOnAlways = moveRowToList(
   defaultRowPrefs(cursorCard.rows),
   'text:Extra Usage',
@@ -274,9 +346,16 @@ const extraOnAlways = moveRowToList(
 );
 assert.deepEqual(extraOnAlways.always.slice(-1), ['text:Extra Usage']);
 assert.equal(visibleRowsFor(cursorCard, { collapsed: true, prefs: extraOnAlways }).length, 3);
-const disabledApi = setRowEnabled(defaultRowPrefs(cursorCard.rows), 'metric:API', false);
+const cursorPrefs = defaultRowPrefs(cursorCard.rows);
+const disabledApi = setRowEnabled(cursorPrefs, 'metric:API', false);
 assert.equal(disabledApi.off['metric:API'], true);
+assert.deepEqual(disabledApi.always, cursorPrefs.always);
+assert.deepEqual(disabledApi.demand, cursorPrefs.demand);
 assert.equal(visibleRowsFor(cursorCard, { collapsed: false, prefs: disabledApi }).length, 3);
+const reenabledApi = setRowEnabled(disabledApi, 'metric:API', true);
+assert.equal(reenabledApi.off['metric:API'], undefined);
+assert.deepEqual(reenabledApi.always, cursorPrefs.always);
+assert.deepEqual(reenabledApi.demand, cursorPrefs.demand);
 const mergedStored = mergeRowPrefs(cursorCard.rows, {
   always: ['metric:API'],
   demand: ['metric:Total'],
@@ -312,53 +391,34 @@ assert.deepEqual(synced.cardOrder, ['cursor', 'openai', 'anthropic']);
 assert.ok(store.getItem(LAYOUT_KEY).includes('cursor'));
 assert.deepEqual(emptyLayout().cardOrder, []);
 
-// --- density / resetTimes layout fields ------------------------------------
+// --- resetTimes layout field ------------------------------------
 
 {
-  // ARRANGE: a fresh layout
-  // ACT
   const empty = emptyLayout();
-  // ASSERT: defaults are regular density and countdown reset times
-  assert.equal(empty.density, 'regular');
   assert.equal(empty.resetTimes, 'countdown');
 }
 
 {
-  // ARRANGE: valid and invalid values for the new fields
-  // ACT
-  const compactExact = normalizeLayout({ density: 'compact', resetTimes: 'exact' });
-  const junk = normalizeLayout({ density: 'tiny', resetTimes: 'never' });
+  const exact = normalizeLayout({ resetTimes: 'exact' });
+  const junk = normalizeLayout({ resetTimes: 'never' });
   const missing = normalizeLayout({});
-  // ASSERT: only the two known values survive; everything else falls back
-  assert.equal(compactExact.density, 'compact');
-  assert.equal(compactExact.resetTimes, 'exact');
-  assert.equal(junk.density, 'regular');
+  assert.equal(exact.resetTimes, 'exact');
   assert.equal(junk.resetTimes, 'countdown');
-  assert.equal(missing.density, 'regular');
   assert.equal(missing.resetTimes, 'countdown');
 }
 
 {
-  // ARRANGE: a saved layout with the new fields set
-  const densityStore = memoryStorage();
-  saveLayout(densityStore, { cardOrder: ['cursor'], density: 'compact', resetTimes: 'exact' });
-  // ACT: reload and sync against the live card set
-  const reloaded = loadLayout(densityStore);
+  const store = memoryStorage();
+  saveLayout(store, { cardOrder: ['cursor'], resetTimes: 'exact' });
+  const reloaded = loadLayout(store);
   const resynced = syncLayout(reloaded, ['anthropic', 'cursor']);
-  // ASSERT: both fields round-trip through storage and syncLayout
-  assert.equal(reloaded.density, 'compact');
   assert.equal(reloaded.resetTimes, 'exact');
-  assert.equal(resynced.density, 'compact');
   assert.equal(resynced.resetTimes, 'exact');
   assert.deepEqual(resynced.cardOrder, ['cursor', 'anthropic']);
 }
 
 {
-  // ARRANGE: a layout with bogus values for the new fields
-  // ACT
-  const cleaned = syncLayout({ cardOrder: [], density: 'huge', resetTimes: 'maybe' }, ['anthropic']);
-  // ASSERT: syncLayout normalizes rather than passing junk through
-  assert.equal(cleaned.density, 'regular');
+  const cleaned = syncLayout({ cardOrder: [], resetTimes: 'maybe' }, ['anthropic']);
   assert.equal(cleaned.resetTimes, 'countdown');
 }
 
@@ -370,6 +430,11 @@ assert.equal(meterColor('high'), 'yellow');
 assert.equal(meterColor('critical'), 'red');
 assert.equal(meterColor('nope'), 'blue');
 assert.equal(meterColor(undefined), 'blue');
+assert.equal(meterColor('low', { state: 'ahead', sparePercent: 40 }), 'blue');
+assert.equal(meterColor('low', { state: 'onTrack', sparePercent: 2 }), 'yellow');
+assert.equal(meterColor('low', { state: 'onTrack', sparePercent: 0 }), 'red');
+assert.equal(meterColor('low', { state: 'behind', sparePercent: -12 }), 'red');
+assert.equal(meterColor('low', null, true), 'red');
 
 // --- resetText / resetAlternate / formatResetExact ---------------------------
 
@@ -994,6 +1059,45 @@ assert.equal(headlineAlternate({ kind: 'metric', leftPercent: 0, usedPercent: 10
 assert.equal(headlineAlternate({ kind: 'metric', leftPercent: 81, usedPercent: 19 }, 'used'), '81% left');
 assert.equal(headlineAlternate(null, 'left'), '');
 
+// A metric that names `value` as its headline draws the money figure, like the
+// Omarchy bar; the percentage and the report's detail move to the hover text.
+// `percent` keeps the used/left toggle, and an older report without the field
+// is a percentage.
+const tank = (headline) => projectCards(parseHostPayload({
+  version: '1.21.0',
+  entries: [{
+    id: 'deepseek',
+    display_name: 'DeepSeek',
+    sections: [{
+      type: 'metric',
+      label: 'Balance',
+      percent: 40,
+      value: headline === 'value' ? '$12.00' : '40%',
+      detail: headline === 'value' ? '40% of $20.00 used ($12.00 left)' : '$12.00 of $20.00 left (40% used)',
+      severity: 'low',
+      ...(headline ? { headline } : {}),
+    }],
+  }],
+}), 0)[0].rows[0];
+const amountRow = tank('value');
+assert.equal(amountRow.headline, 'value');
+assert.equal(headlineLabel(amountRow, 'left'), '$12.00');
+assert.equal(headlineLabel(amountRow, 'used'), '$12.00');
+assert.equal(headlineAlternate(amountRow, 'used'), '40% used · 40% of $20.00 used ($12.00 left)');
+assert.equal(headlineAlternate(amountRow, 'left'), '60% left · 40% of $20.00 used ($12.00 left)');
+const percentRow = tank('percent');
+assert.equal(percentRow.headline, 'percent');
+assert.equal(headlineLabel(percentRow, 'used'), '40% used');
+assert.equal(headlineAlternate(percentRow, 'used'), '60% left');
+assert.equal(tank(undefined).headline, 'percent');
+assert.equal(headlineLabel(tank(undefined), 'left'), '60% left');
+// A `value` headline with no value to draw falls back to the percentage
+// rather than an empty button.
+assert.equal(projectCards(parseHostPayload({
+  version: '1.21.0',
+  entries: [{ id: 'deepseek', sections: [{ type: 'metric', label: 'Balance', percent: 40, value: '', headline: 'value' }] }],
+}), 0)[0].rows[0].headline, 'percent');
+
 // --- condensedTextRowIndexes -------------------------------------------------
 
 assert.deepEqual(
@@ -1015,6 +1119,7 @@ assert.deepEqual(condensedTextRowIndexes('nope'), []);
 assert.equal(providerIconId('anthropic@work'), 'anthropic');
 assert.equal(providerIconId('supergrok'), 'grok');
 assert.equal(providerIconId('SuperGrok@personal'), 'grok');
+assert.equal(providerIconId('grokbot'), 'grokbot');
 assert.equal(providerIconId(' OpenAI '), 'openai');
 assert.equal(providerIconId(''), '');
 assert.equal(providerIconId(undefined), '');
@@ -1065,7 +1170,7 @@ assert.equal(metricCount(null), 0);
   assert.doesNotThrow(() => sendCommand('refresh', { x: 1 }));
 }
 
-// --- resolvedTheme / applyDensity --------------------------------------------
+// --- resolvedTheme --------------------------------------------
 
 assert.equal(resolvedTheme('dark'), 'dark');
 assert.equal(resolvedTheme('light'), 'light');
@@ -1093,20 +1198,139 @@ assert.equal(resolvedTheme('light'), 'light');
 assert.equal(resolvedTheme('system'), 'light');
 
 {
-  // ARRANGE: a minimal document
-  globalThis.document = { documentElement: { dataset: {} } };
-  try {
-    // ACT
-    applyDensity('compact');
-    assert.equal(globalThis.document.documentElement.dataset.density, 'compact');
-    applyDensity('anything-else');
-    // ASSERT
-    assert.equal(globalThis.document.documentElement.dataset.density, 'regular');
-  } finally {
-    delete globalThis.document;
-  }
+  const layout = emptyLayout();
+  assert.equal(layout.stripStyle, 'bars');
+  assert.deepEqual(layout.stars, {});
+  const restored = normalizeLayout({
+    stripStyle: 'text',
+    stars: { anthropic: ['metric:Weekly', 'metric:Session', 'metric:Extra'] },
+  });
+  assert.equal(restored.stripStyle, 'bars');
+  assert.deepEqual(restored.stars.anthropic, ['metric:Weekly', 'metric:Session']);
+  assert.equal(MAX_STARS_PER_PROVIDER, 2);
 }
-// no document: no-op
-assert.doesNotThrow(() => applyDensity('compact'));
+
+{
+  const payload = parseHostPayload({
+    entries: [{
+      id: 'anthropic',
+      display_name: 'Claude',
+      sections: [
+        { type: 'metric', label: 'Weekly', percent: 19 },
+        { type: 'metric', label: 'Session', percent: 41 },
+        { type: 'text', label: 'Extra', value: '$1' },
+      ],
+    }],
+  });
+  const cards = projectCards(payload, 0);
+  const stars = defaultStars(cards);
+  assert.deepEqual(stars.anthropic, ['metric:Weekly', 'metric:Session']);
+  assert.equal(isStarred(stars, 'anthropic', 'metric:Weekly'), true);
+  const added = toggleStar(stars, 'anthropic', 'metric:Weekly');
+  assert.equal(isStarred(added.stars, 'anthropic', 'metric:Weekly'), false);
+  assert.equal(added.error, '');
+  const capped = toggleStar(stars, 'anthropic', 'text:Extra');
+  assert.equal(capped.error, 'Up to 2 stars per provider');
+  assert.deepEqual(capped.stars, stars);
+  const seeded = seedStars(emptyLayout(), cards);
+  assert.deepEqual(seeded.stars, stars);
+  const kept = seedStars(seeded, cards);
+  assert.equal(kept, seeded);
+  assert.deepEqual(stripCommand(seeded, cards), {
+    style: 'bars',
+    stars,
+    order: ['anthropic'],
+  });
+}
+
+{
+  const payload = parseHostPayload({
+    entries: [
+      { id: 'anthropic', display_name: 'Claude', sections: [{ type: 'metric', label: 'Weekly', percent: 10 }] },
+      { id: 'openai', display_name: 'Codex', sections: [{ type: 'metric', label: 'Codex weekly', percent: 2 }] },
+    ],
+  });
+  const cards = projectCards(payload, 0);
+  const layout = {
+    ...emptyLayout(),
+    cardOrder: ['openai', 'anthropic'],
+    stars: {
+      anthropic: ['metric:Weekly'],
+      openai: ['metric:Codex weekly'],
+    },
+  };
+  assert.deepEqual(stripCommand(layout, cards).order, ['openai', 'anthropic']);
+}
+
+{
+  assert.equal(expirySeverity(1_000 + 8 * 24 * 3600 * 1000, 1_000), 'blue');
+  assert.equal(expirySeverity(1_000 + 3 * 24 * 3600 * 1000, 1_000), 'yellow');
+  assert.equal(expirySeverity(1_000 + 2 * 3600 * 1000, 1_000), 'red');
+  assert.equal(expirySeverity(500, 1_000), 'red');
+  // A host that sends `reset_credits` without the text block still gets the
+  // row, and it starts On Demand like every non-metric row.
+  const payload = parseHostPayload({
+    entries: [{
+      id: 'openai',
+      display_name: 'Codex',
+      reset_credits: { available: 2, credits: [{ expires_at: '2026-10-03T23:00:00Z' }] },
+      sections: [
+        { type: 'metric', label: 'Weekly', percent: 10, reset_at: '2026-10-01T00:00:00Z' },
+      ],
+    }],
+  });
+  const [card] = projectCards(payload, 0);
+  assert.equal(card.resetCredits.available, 2);
+  const resets = card.rows.find((row) => row.kind === 'resetCredits');
+  assert.equal(resets.label, 'Rate Limit Resets');
+  assert.equal(resets.available, 2);
+  assert.equal(resets.credits.length, 1);
+  assert.equal(card.rows.filter((row) => row.kind === 'resetCredits').length, 1);
+  const prefs = defaultRowPrefs(card.rows);
+  assert.ok(prefs.demand.indexOf('resetCredits:Rate Limit Resets') >= 0);
+  assert.ok(prefs.always.indexOf('resetCredits:Rate Limit Resets') < 0);
+}
+
+{
+  assert.equal(isHttpUrl('https://status.anthropic.com/'), true);
+  assert.equal(isHttpUrl('javascript:alert(1)'), false);
+  const claude = providerLinks('anthropic');
+  assert.equal(claude.length, 2);
+  assert.equal(claude[0].label, 'Status');
+  assert.equal(claude[1].label, 'Dashboard');
+  const codex = providerLinks('openai@work');
+  assert.equal(codex[0].label, 'Status');
+  assert.equal(codex[1].label, 'Dashboard');
+  assert.equal(providerLinks('unknown-vendor').length, 0);
+  const grok = providerLinks('supergrok');
+  assert.equal(grok.length, 1);
+  assert.equal(grok[0].label, 'Usage');
+  assert.ok(grok[0].url.indexOf('https://grok.com/') === 0);
+}
+
+{
+  assert.equal(prettyMetricLabel('anthropic', 'Session (5h)'), 'Session');
+  assert.equal(prettyMetricLabel('anthropic', 'Weekly (7d)'), 'Weekly');
+  assert.equal(prettyMetricLabel('anthropic', 'Fable (7d)'), 'Fable');
+  assert.equal(prettyMetricLabel('openai', 'Codex weekly'), 'Weekly');
+  assert.equal(prettyMetricLabel('openai', 'Codex 5h'), 'Session');
+  assert.equal(prettyMetricLabel('cursor', 'Cursor Models'), 'Cursor Models');
+  assert.equal(prettyMetricLabel('antigravity', 'Gemini', 'Session'), 'Gemini (Session)');
+  const payload = parseHostPayload({
+    entries: [{
+      id: 'openai',
+      display_name: 'Codex',
+      sections: [
+        { type: 'metric', label: 'Codex weekly', percent: 28 },
+        { type: 'metric', label: 'Codex 5h', percent: 0 },
+      ],
+    }],
+  });
+  const [card] = projectCards(payload, 0);
+  assert.equal(card.rows[0].label, 'Weekly');
+  assert.equal(card.rows[0].key, 'metric:Codex weekly');
+  assert.equal(card.rows[1].label, 'Session');
+  assert.equal(card.rows[1].key, 'metric:Codex 5h');
+}
 
 console.log('ok');

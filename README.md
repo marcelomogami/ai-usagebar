@@ -23,7 +23,7 @@ codebase.
 - An optional Claude Code context view reads recent local session usage without
   scanning entire histories.
 - Native integrations are available for Omarchy, GNOME Shell, KDE Plasma 6,
-  the macOS menu bar, and a Windows system-tray popover.
+  and a macOS/Windows system-tray popover (`ai-usagebar-tray`).
 - One bar item can cycle through enabled providers. `[ui] primary` controls the
   initial provider in both the widget and TUI.
 - Atomic caches and file locking prevent duplicate requests from multi-monitor
@@ -206,6 +206,16 @@ The **Waybar widget is Wayland-only and does not apply to Windows.** Use the
 reads the same `usage --json` report as the KDE plasmoid, in-process — no
 console window. `ai-usagebar --json` / `--pretty` still work for scripting.
 
+Install with [Scoop](https://scoop.sh) from the official bucket:
+
+```powershell
+scoop bucket add akitaonrails https://github.com/akitaonrails/scoop-bucket
+scoop install ai-usagebar
+```
+
+Scoop owns updates for Scoop installs (`scoop update ai-usagebar`); the
+tray's built-in updater applies to standalone ZIP installs.
+
 ![Windows tray popover dashboard — provider cards for Claude, Codex, Cursor, SuperGrok and Antigravity with capsule meters, "used / Resets in" lines under each bar, pace notes such as "Limit in 2d 7h" and "~63% left at reset", and the footer with the AI Usage version, a "Next update in" countdown and the Options menu](screenshots/windows-tray-dashboard.png)
 
 Build with a standard Rust toolchain plus **Node.js 20+** (the tray WebView is
@@ -256,10 +266,11 @@ come from environment variables or `config.toml`.
 | Kimi | Existing Kimi Code CLI login **or** API key (`KIMI_API_KEY` or config) | Opt in, then either log in with `kimi` (nothing to paste) or set an API key, which wins when present. A Kimi For Coding subscription can issue one at kimi.com/code/console. |
 | Kilo | API key (`KILO_API_KEY` env or `[kilo] api_key` in config) | Set either. Opt-in. For a team balance, also set `[kilo] organization_id`; omit it for the personal balance. |
 | Novita | API key (`NOVITA_API_KEY` env or `[novita] api_key` in config) | Set either. Opt-in. |
+| OrcaRouter | API key (`ORCAROUTER_API_KEY` env or `[orcarouter] api_key` in config) | Set either. Opt-in. Reports the credit card (spend / total limit / remaining, key expiry) from the one-api compatible dashboard billing endpoints. |
 | Moonshot | API key (`MOONSHOT_API_KEY` or config) | Opt in. Set region `cn` for CNY; `global` uses USD. |
 | Grok (xAI) | Management key | Opt in with `XAI_MANAGEMENT_KEY` or config. An inference key does not work. |
 | SuperGrok | Existing `grok login` (its `auth.json` key, or its ACP extension) | Opt in, install Grok Build, and run `grok login`. This reports subscription usage — overall included credits plus per-product slices (Build, Chat, Imagine) — not the Management API balance. |
-| Grok Bot | Existing Grok Bot desktop sign-in (Linux) | Opt in, install the Grok Bot desktop app, and sign in to it once. This reports the app's weekly included-usage pool — not the Management API balance, and not the Grok Build subscription. Refreshed tokens stay in ai-usagebar's cache; the app's own file is never written. |
+| Grok Bot | Existing Grok Bot desktop sign-in (Linux and macOS) | Opt in, install the Grok Bot desktop app, and sign in to it once. This reports the app's weekly included-usage pool — not the Management API balance, and not the Grok Build subscription. Refreshed tokens stay in ai-usagebar's cache; the app's own file is never written. |
 | MiniMax | Token Plan subscription key | Opt in with `MINIMAX_API_KEY` or config. Choose the matching global or China region; pay-as-you-go keys do not work. |
 | Google Antigravity | Local Antigravity server, or the saved Google session | Opt in. The desktop products provide quota through their local server. The `agy` CLI currently requires a CSRF token it does not publish, so ai-usagebar uses the Google OAuth session saved in the OS keyring or `~/.gemini/antigravity-cli/antigravity-oauth-token` and asks the Cloud Code API instead. The TUI labels this fallback `Google API`. The same fallback applies when no product is running. |
 | Cursor | Existing Cursor IDE or `cursor-agent` login | Opt in and sign in once. `cursor-agent` is the headless fallback. |
@@ -267,6 +278,7 @@ come from environment variables or `config.toml`.
 | Nous Research | OAuth device flow | Enable `[nous]`, click **Log in with Nous Research** in the Omarchy settings panel, or run `ai-usagebar auth nous login`. Credentials are kept in ai-usagebar's separate platform config directory (`~/.config/ai-usagebar/credentials.json` on Linux). |
 | OpenCode Go | API key (`OPENCODE_GO_API_KEY` env or `[opencode-go] api_key` in config) | Enable `[opencode-go]`, then enter the key in the Omarchy settings panel or set the environment variable. |
 | Command Code | Existing `commandcode` or pi login | Enable `[commandcode]` and sign in to either one once. No key to paste; `COMMANDCODE_API_KEY` overrides if you prefer one. |
+| Model Studio | Existing `bl auth login --console` (Alibaba Cloud) | Opt in (`[modelstudio]`), install the official `bl` CLI, and run `bl auth login --console` once. Reports the Token Plan's 5-hour and weekly percentage windows with resets, through the same console gateway the CLI uses; the credential file `~/.bailian/config.json` is only ever read. |
 
 ### Nous credits and OpenCode Go
 
@@ -300,7 +312,10 @@ subscription's billing period end.
 
 **There is no key to enter, and no key field in the settings panel.**
 Command Code appears in the provider selector but not in the key list, the same
-way Claude, Codex, Cursor and Kiro do — enable `[commandcode]` and it works.
+way Claude, Codex, Cursor and Kiro do. It is enabled by default like Codex; if
+no local credential exists, the TUI shows the tab as unavailable rather than
+silently omitting the provider. Set `enabled = false` under `[commandcode]` to
+hide it.
 
 Credentials are reused, never issued. The OAuth token comes from
 `~/.commandcode/auth.json` from the official CLI first, then
@@ -331,6 +346,26 @@ team_id = "your-team-id"
 
 Without it, an organization-scoped key reports an error saying exactly this
 rather than silently querying the wrong URL.
+
+#### Giving a prepaid balance a tank
+
+DeepSeek, Kilo, Novita, Moonshot and prepaid Grok report money **left** and no
+denominator, so their row is a plain balance rather than a meter. Tell them how
+big the tank is and it becomes one:
+
+```toml
+[deepseek]
+display_limit = 200        # in the currency that vendor already reports
+headline = "percent"       # "amount" (default here) puts the money on the bar
+```
+
+The percentage is consumed — `(display_limit - balance) / display_limit`,
+clamped to 0–100 — and whichever number is not the headline stays in the detail
+line. There is no default limit: without one nothing changes. A vendor that
+states its own limit keeps it, which is why `[openrouter]` has no
+`display_limit` — it reports credits purchased against credits used. It does
+take `headline`. Full rules in
+[docs/configuration.md](docs/configuration.md#balance-tanks).
 
 ### Enabling a vendor
 
@@ -547,7 +582,8 @@ ai-usagebar --vendor kiro
 ai-usagebar --json
 
 # Everything at once: quota + time-to-reset for every configured vendor,
-# with one entry per named Claude account.
+# with one entry per named Claude account. Exits 0 after a complete document
+# (per-entry errors are data); non-zero only when the document cannot be produced.
 ai-usagebar usage
 ai-usagebar usage --json | jq '.entries[] | {id, metrics, sections}'
 
@@ -581,6 +617,11 @@ The top-level `schema_version` is currently `1`. Consumers should ignore
 unknown fields and treat absent fields as not applicable. The version changes
 only when a tolerant reader could not safely absorb a change.
 
+`usage` (plain or `--json`) exits 0 after printing a complete document, even
+when every entry carries its own `error`. Non-zero means the command could not
+produce the document (missing or unreadable `--config`, unparseable TOML, no
+vendors enabled, or a runtime/bootstrap failure).
+
 `usage` reports only the providers that are **enabled**, which makes the
 switched-off and the never-credentialed exactly the rows it cannot describe.
 `vendors --json` is the catalog that covers them: one row per provider with its
@@ -591,14 +632,21 @@ that fixes it. It contacts nothing. A frontend drawing a per-provider health
 list reads both and needs no provider table of its own — `needs_credential` is
 `false` only for Antigravity, which has no credential to be missing.
 
-The report also includes the configured `primary` id. Each entry has
+The report also includes the configured `primary`, resolved to an entry id
+from `entries` — with named accounts, the first entry of the configured
+vendor (so `anthropic` reports `anthropic@claude-me` when that is the entry
+present); a primary naming a vendor with no entries keeps the vendor slug.
+Each entry has
 `display_name`, `short_name`, `status`, `stale`, and `fetched_at`; metric rows
 may add `severity`, an absolute `reset_at`, and `window_secs`, the exact length
 of the reset window in seconds. `window_secs` is present only when the vendor
 states the window (rolling 5h/7d windows; Cursor's billing cycle from
 `billingCycleStart`/`billingCycleEnd`, assumed to be 30 days when the start is
 missing) and is omitted, not `null`, otherwise — a calendar month or an unstated
-window gives a frontend nothing to pace against. These fields are additive, so
+window gives a frontend nothing to pace against. Every metric row also carries
+`headline` — `"percent"` or `"value"` — naming which of its two numbers belongs
+on the bar; a frontend draws that one and leaves the other in the detail line,
+rather than inferring a balance row from its label. These fields are additive, so
 existing consumers remain compatible. `short_name` is the same three-letter
 code `{vendor_short}` prints, so a frontend that wants a compact provider tag
 takes it from the report instead of keeping its own table.
@@ -662,7 +710,7 @@ privileges, and does not overwrite user configuration.
 
 | Integration | Supported providers | Notes |
 |---|---|---|
-| [macOS menu bar](macos/README.md) | All providers supported by the binary (`vendors --json`) | Rate-limit windows, monthly & video pools, balances, multiple accounts, Overview. |
+| [macOS menu bar](macos/README.md) | Whatever `usage --json` reports | `ai-usagebar-tray`: WKWebView popover + usage-chart glyph. |
 | [GNOME Shell](gnome-extension/README.md) | Claude, Codex, Z.AI, OpenRouter, DeepSeek, Google Antigravity | Antigravity's two quota pools appear as grouped rows. |
 | [KDE Plasma 6](kde-plasmoid/README.md) | Whatever `usage --json` reports | Provider tabs in the popup; vendor is per applet instance. |
 | [Windows tray](windows/README.md) | Whatever `usage --json` reports | NotifyIcon + WebView2 popover; left-click the tray icon. |

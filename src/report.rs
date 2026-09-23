@@ -51,6 +51,9 @@ struct Entry {
     error: Option<String>,
     stale: bool,
     fetched_at: Option<DateTime<Utc>>,
+    /// Structured banked-reset inventory for rich frontends. The human-readable
+    /// block remains in `sections` for the text report and older consumers.
+    reset_credits: Option<crate::usage::ResetCredits>,
 }
 
 /// Lossless machine-readable projection of a TUI panel row. `metrics` remains
@@ -65,6 +68,13 @@ enum ReportSection {
         elapsed_percent: Option<i32>,
         value: String,
         detail: String,
+        /// Which of `percent` and `value` this metric puts on the bar —
+        /// `"percent"` or `"value"`. A consumer that honours it draws the named
+        /// one and leaves the other in the detail line, rather than inferring a
+        /// balance row from its label. Always present, so no consumer has to
+        /// guess; not every consumer reads it — Waybar and GNOME take their bar
+        /// text from per-vendor formats instead.
+        headline: String,
         severity: String,
         reset_at: Option<DateTime<Utc>>,
         /// Full length of the reset window in seconds, present only when the
@@ -234,6 +244,7 @@ fn entry_from_state(tab: &TabId, state: &TabState, now: chrono::DateTime<Utc>) -
             TabState::Ready(ready) => ready.fetched_at,
             _ => None,
         },
+        reset_credits: reset_credits_for(state),
     };
     // The error is already a first-class entry field. Do not duplicate the
     // TUI's interactive retry instructions as report data.
@@ -257,6 +268,7 @@ fn entry_from_state(tab: &TabId, state: &TabState, now: chrono::DateTime<Utc>) -
                     elapsed_percent: projected.elapsed_percent,
                     value: value_label,
                     detail: footnote,
+                    headline: projected.headline.as_str().into(),
                     severity: severity.as_str().into(),
                     reset_at: projected.reset_at,
                     window_secs: projected
@@ -277,8 +289,25 @@ fn entry_from_state(tab: &TabId, state: &TabState, now: chrono::DateTime<Utc>) -
     entry
 }
 
+fn reset_credits_for(state: &TabState) -> Option<crate::usage::ResetCredits> {
+    let credits = match state {
+        TabState::Ready(ready) => match &ready.snapshot {
+            crate::usage::VendorSnapshot::Openai(snapshot) => &snapshot.reset_credits,
+            crate::usage::VendorSnapshot::SuperGrok(snapshot) => &snapshot.reset_credits,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (!credits.is_empty()).then(|| credits.clone())
+}
+
+/// Process status after a complete document has been printed.
+///
+/// Per-entry fetch/auth failures are data inside the document, not a command
+/// failure. Empty is not a document — [`collect_entries`] already fails before
+/// this when nothing is enabled.
 fn report_exit_code(entries: &[Entry]) -> i32 {
-    i32::from(entries.iter().all(|entry| entry.error.is_some()))
+    i32::from(entries.is_empty())
 }
 
 /// Stable machine id shared by aggregate views and the macOS menu bar:
@@ -352,10 +381,32 @@ fn format_tab_name(tab: &TabId, vendor_name: &str) -> String {
     crate::display::sanitize_untrusted_field(&name)
 }
 
+/// Resolve the `primary` the report should name to an id `entries` actually
+/// carries.
+///
+/// `config.ui.primary` is a vendor slug, but with named accounts the entry
+/// ids are `vendor@account`, so the raw slug names an id no entry has —
+/// `primary: "anthropic"` next to `anthropic@claude-me`. The first entry of
+/// that vendor (the bare slug, or the first `{slug}@…` account) wins; a slug
+/// with no matching entry is kept as-is, because the config naming a
+/// disabled or absent vendor is information worth reporting, not something
+/// to paper over with a guess. `None` (unset) stays `None`.
+fn resolve_primary(primary: Option<&str>, entries: &[Entry]) -> Option<String> {
+    primary.map(|slug| {
+        // The `@` suffix keeps a slug that is a prefix of another vendor's
+        // ("openai" vs "openrouter") from matching that vendor's accounts.
+        entries
+            .iter()
+            .find(|entry| entry.id == slug || entry.id.starts_with(&format!("{slug}@")))
+            .map(|entry| entry.id.clone())
+            .unwrap_or_else(|| slug.to_string())
+    })
+}
+
 fn render_json_for_primary(entries: &[Entry], primary: Option<&str>) -> String {
     json!({
         "schema_version": USAGE_SCHEMA_VERSION,
-        "primary": primary,
+        "primary": resolve_primary(primary, entries),
         "entries": json_rows(entries),
     })
     .to_string()
@@ -385,6 +436,7 @@ fn json_rows(entries: &[Entry]) -> Vec<serde_json::Value> {
                         elapsed_percent,
                         value,
                         detail,
+                        headline,
                         severity,
                         reset_at,
                         window_secs,
@@ -396,6 +448,7 @@ fn json_rows(entries: &[Entry]) -> Vec<serde_json::Value> {
                             "elapsed_percent": elapsed_percent,
                             "value": value,
                             "detail": detail,
+                            "headline": headline,
                             "severity": severity,
                             "reset_at": reset_at,
                         });
@@ -422,6 +475,7 @@ fn json_rows(entries: &[Entry]) -> Vec<serde_json::Value> {
                 "error": entry.error,
                 "stale": entry.stale,
                 "fetched_at": entry.fetched_at,
+                "reset_credits": entry.reset_credits,
                 "metrics": metrics,
                 "sections": entry.sections,
             });
@@ -521,8 +575,9 @@ mod tests {
     use super::*;
     use crate::tui::app::ReadyTab;
     use crate::usage::{
-        AnthropicSnapshot, DeepseekSnapshot, KimiSnapshot, KiroSnapshot, OpenRouterSnapshot,
-        UsageWindow, VendorSnapshot,
+        AnthropicSnapshot, DeepseekSnapshot, KimiSnapshot, KiroSnapshot, OpenAiSnapshot,
+        OpenAiSource, OpenRouterSnapshot, ResetCredit, ResetCredits, SuperGrokPeriod,
+        SuperGrokSnapshot, UsageWindow, VendorSnapshot,
     };
     use crate::vendor::VendorId;
 
@@ -539,6 +594,7 @@ mod tests {
             error: None,
             stale: false,
             fetched_at: None,
+            reset_credits: None,
         }
     }
 
@@ -549,6 +605,7 @@ mod tests {
             elapsed_percent: None,
             value: value.into(),
             detail: detail.into(),
+            headline: "percent".into(),
             severity: "mid".into(),
             reset_at: None,
             window_secs: None,
@@ -713,6 +770,89 @@ mod tests {
         assert_eq!(value["entries"][1]["id"], "openai");
     }
 
+    /// #228: `config.ui.primary` is a vendor slug, but entry ids carry
+    /// account labels for named accounts, so the reported `primary` is
+    /// resolved to an id one of the entries actually has.
+    #[test]
+    fn primary_resolves_to_an_entry_id_the_report_actually_carries() {
+        // Bare entries: the slug already is an entry id, so it stays.
+        let bare = vec![entry("anthropic", Vec::new()), entry("openai", Vec::new())];
+        assert_eq!(
+            resolve_primary(Some("anthropic"), &bare),
+            Some("anthropic".into())
+        );
+
+        // Named accounts only: the first account's entry id is reported, so
+        // `primary` names an id `entries` carries.
+        let accounts = vec![
+            entry("anthropic@claude-me", Vec::new()),
+            entry("anthropic@claude-b3", Vec::new()),
+        ];
+        assert_eq!(
+            resolve_primary(Some("anthropic"), &accounts),
+            Some("anthropic@claude-me".into())
+        );
+
+        // A bare entry wins over accounts of the same vendor: it is the
+        // first entry the slug matches.
+        let mixed = vec![
+            entry("anthropic", Vec::new()),
+            entry("anthropic@claude-me", Vec::new()),
+        ];
+        assert_eq!(
+            resolve_primary(Some("anthropic"), &mixed),
+            Some("anthropic".into())
+        );
+
+        // A slug that prefixes another vendor's name must not match that
+        // vendor's entries: the `@` delimiter is what keeps this exact.
+        let openrouter = vec![entry("openrouter@work", Vec::new())];
+        assert_eq!(
+            resolve_primary(Some("openai"), &openrouter),
+            Some("openai".into())
+        );
+
+        // No matching entry: the config names a disabled or absent vendor,
+        // which is worth reporting as-is rather than papering over.
+        assert_eq!(
+            resolve_primary(Some("cursor"), &accounts),
+            Some("cursor".into())
+        );
+
+        // Unset stays unset.
+        assert_eq!(resolve_primary(None, &accounts), None);
+    }
+
+    /// The same resolution as seen through the rendered JSON: consumers may
+    /// now treat `primary` as an entry id present in `entries`.
+    #[test]
+    fn json_primary_resolves_to_the_first_named_account_entry() {
+        let rendered = render_json_for_primary(
+            &[
+                entry("anthropic@claude-me", Vec::new()),
+                entry("anthropic@claude-b3", Vec::new()),
+            ],
+            Some("anthropic"),
+        );
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["primary"], "anthropic@claude-me");
+        let ids: Vec<&str> = value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&value["primary"].as_str().unwrap()));
+
+        // The honest fallback: a primary naming a vendor with no entries
+        // keeps the slug instead of picking some other entry.
+        let unmatched =
+            render_json_for_primary(&[entry("anthropic@claude-me", Vec::new())], Some("cursor"));
+        let value: serde_json::Value = serde_json::from_str(&unmatched).unwrap();
+        assert_eq!(value["primary"], "cursor");
+        assert_eq!(value["entries"][0]["id"], "anthropic@claude-me");
+    }
+
     #[test]
     fn every_json_report_declares_its_schema_version() {
         let aggregate: serde_json::Value = serde_json::from_str(&render_json_for_primary(
@@ -741,6 +881,7 @@ mod tests {
             stale: true,
             last_error: None,
             fetched_at: Some(fetched_at),
+            display: Default::default(),
         }));
         let projected = entry_from_state(&TabId::vendor(VendorId::Kiro), &state, Utc::now());
         let rendered = render_json_for_primary(&[projected], None);
@@ -785,6 +926,7 @@ mod tests {
             stale: false,
             last_error: None,
             fetched_at: None,
+            display: Default::default(),
         }));
         let projected = entry_from_state(&TabId::vendor(VendorId::Supergrok), &state, Utc::now());
         let rendered = render_json_for_primary(&[projected], None);
@@ -797,6 +939,87 @@ mod tests {
         assert_eq!(first["sections"][2]["group"], "Breakdown");
         assert!(first["metrics"][0].get("group").is_none());
         assert_eq!(first["metrics"][1]["group"], "Breakdown");
+    }
+
+    #[test]
+    fn json_exposes_banked_reset_expiries_without_removing_the_text_block() {
+        let expiry: DateTime<Utc> = "2026-09-20T23:58:00Z".parse().unwrap();
+        let state = TabState::Ready(Box::new(ReadyTab {
+            snapshot: VendorSnapshot::Openai(OpenAiSnapshot {
+                plan: "ChatGPT Pro".into(),
+                session: None,
+                weekly: None,
+                code_review: None,
+                additional_limits: Vec::new(),
+                unavailable_models: Vec::new(),
+                credits: None,
+                reset_credits: ResetCredits {
+                    available: 2,
+                    credits: vec![ResetCredit {
+                        title: Some("Full reset".into()),
+                        expires_at: Some(expiry),
+                    }],
+                },
+                source: OpenAiSource::CodexOauth,
+            }),
+            stale: false,
+            last_error: None,
+            fetched_at: None,
+            display: Default::default(),
+        }));
+        let projected = entry_from_state(&TabId::vendor(VendorId::Openai), &state, Utc::now());
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json_for_primary(&[projected], None)).unwrap();
+        let entry = &value["entries"][0];
+
+        assert_eq!(entry["reset_credits"]["available"], 2);
+        assert_eq!(entry["reset_credits"]["credits"][0]["title"], "Full reset");
+        assert_eq!(
+            entry["reset_credits"]["credits"][0]["expires_at"],
+            expiry.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        );
+        assert!(
+            entry["sections"].as_array().unwrap().iter().any(|section| {
+                section["type"] == "block" && section["label"] == "Reset credits"
+            })
+        );
+    }
+
+    #[test]
+    fn json_exposes_supergrok_reset_credit_expiries() {
+        let expiry: DateTime<Utc> = "2026-10-03T23:00:00Z".parse().unwrap();
+        let state = TabState::Ready(Box::new(ReadyTab {
+            snapshot: VendorSnapshot::SuperGrok(SuperGrokSnapshot {
+                plan: "SuperGrok".into(),
+                account: "test-account".into(),
+                weekly_pct: 0,
+                period: SuperGrokPeriod::Weekly,
+                reset_at: None,
+                prepaid_balance: None,
+                reset_credits: ResetCredits {
+                    available: 1,
+                    credits: vec![ResetCredit {
+                        title: None,
+                        expires_at: Some(expiry),
+                    }],
+                },
+                products: Vec::new(),
+            }),
+            stale: false,
+            last_error: None,
+            fetched_at: None,
+            display: Default::default(),
+        }));
+        let projected = entry_from_state(&TabId::vendor(VendorId::Supergrok), &state, Utc::now());
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json_for_primary(&[projected], None)).unwrap();
+        let entry = &value["entries"][0];
+
+        assert_eq!(entry["reset_credits"]["available"], 1);
+        assert_eq!(
+            entry["reset_credits"]["credits"][0]["expires_at"],
+            expiry.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        );
     }
 
     /// A rolling window's exact length rides along with its row, in both the
@@ -827,6 +1050,7 @@ mod tests {
             stale: false,
             last_error: None,
             fetched_at: None,
+            display: Default::default(),
         }));
         let projected = entry_from_state(&TabId::vendor(VendorId::Anthropic), &state, now);
         let rendered = render_json_for_primary(&[projected], None);
@@ -949,6 +1173,7 @@ mod tests {
             stale: false,
             last_error: None,
             fetched_at: Some(now),
+            display: Default::default(),
         }));
 
         let projected = entry_from_state(&TabId::vendor(VendorId::Anthropic), &state, now);
@@ -982,6 +1207,7 @@ mod tests {
             stale: false,
             last_error: None,
             fetched_at: None,
+            display: Default::default(),
         }));
         let projected = entry_from_state(&TabId::vendor(VendorId::Kimi), &state, Utc::now());
         // Pair each reset with its own row rather than pinning the row order —
@@ -1057,6 +1283,7 @@ mod tests {
             stale: false,
             last_error: None,
             fetched_at: None,
+            display: Default::default(),
         }));
         let projected = entry_from_state(&TabId::vendor(VendorId::Openrouter), &state, Utc::now());
         assert!(projected.sections.iter().any(|section| matches!(
@@ -1088,6 +1315,7 @@ mod tests {
             stale: false,
             last_error: None,
             fetched_at: None,
+            display: Default::default(),
         }));
         let projected = entry_from_state(&TabId::vendor(VendorId::Deepseek), &state, Utc::now());
         assert!(projected.sections.iter().any(|section| matches!(
@@ -1100,6 +1328,87 @@ mod tests {
                 .iter()
                 .any(|section| matches!(section, ReportSection::Metric { .. }))
         );
+    }
+
+    /// Every metric declares which of its two numbers goes on the bar, in both
+    /// the ordered `sections` list and the `metrics` convenience view, so no
+    /// frontend has to infer a balance row from its label.
+    #[test]
+    fn json_metrics_name_their_headline() {
+        let deepseek = |display: crate::balance::DisplayPrefs| {
+            let state = TabState::Ready(Box::new(ReadyTab {
+                snapshot: VendorSnapshot::Deepseek(DeepseekSnapshot {
+                    is_available: true,
+                    balance: 50.0,
+                    granted: 50.0,
+                    topped_up: 0.0,
+                    currency: "USD".into(),
+                }),
+                stale: false,
+                last_error: None,
+                fetched_at: None,
+                display,
+            }));
+            let entry = entry_from_state(&TabId::vendor(VendorId::Deepseek), &state, Utc::now());
+            let rendered = render_json_entries(&[entry]);
+            serde_json::from_str::<serde_json::Value>(&rendered).unwrap()
+        };
+
+        let amount = deepseek(crate::balance::DisplayPrefs::balance(
+            Some(200.0),
+            crate::balance::Headline::Amount,
+        ));
+        let metric = &amount["entries"][0]["metrics"][0];
+        assert_eq!(metric["headline"], "value");
+        assert_eq!(metric["percent"], 75);
+        assert_eq!(metric["value"], "$50.00");
+        assert!(
+            metric["detail"].as_str().unwrap().contains("$200.00"),
+            "{metric}"
+        );
+
+        let percent = deepseek(crate::balance::DisplayPrefs::balance(
+            Some(200.0),
+            crate::balance::Headline::Percent,
+        ));
+        let section = percent["entries"][0]["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["type"] == "metric")
+            .expect("a metric section");
+        assert_eq!(section["headline"], "percent");
+        assert_eq!(section["value"], "75%");
+        assert!(
+            section["detail"].as_str().unwrap().contains("$50.00"),
+            "{section}"
+        );
+
+        // A quota vendor is unchanged: still a percent headline.
+        let anthropic_api = entry_from_state(
+            &TabId::vendor(VendorId::Openrouter),
+            &TabState::Ready(Box::new(ReadyTab {
+                snapshot: VendorSnapshot::Openrouter(crate::usage::OpenRouterSnapshot {
+                    label: "OpenRouter".into(),
+                    total_credits: 100.0,
+                    total_usage: 40.0,
+                    usage_daily: 0.0,
+                    usage_weekly: 0.0,
+                    usage_monthly: 0.0,
+                    is_free_tier: false,
+                    limit: None,
+                    limit_remaining: None,
+                }),
+                stale: false,
+                last_error: None,
+                fetched_at: None,
+                display: Default::default(),
+            })),
+            Utc::now(),
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json_entries(&[anthropic_api])).unwrap();
+        assert_eq!(value["entries"][0]["metrics"][0]["headline"], "percent");
     }
 
     #[test]
@@ -1131,14 +1440,19 @@ mod tests {
     }
 
     #[test]
-    fn exit_is_nonzero_only_when_every_entry_failed() {
+    fn produced_document_exits_zero_even_when_every_entry_failed() {
         let mut failed = entry("openai", Vec::new());
         failed.error = Some("not signed in".into());
-        assert_eq!(report_exit_code(&[failed]), 1);
+        assert_eq!(report_exit_code(&[failed]), 0);
 
         let mut failed = entry("openai", Vec::new());
         failed.error = Some("not signed in".into());
         assert_eq!(report_exit_code(&[failed, entry("cursor", Vec::new())]), 0);
+
+        assert_eq!(report_exit_code(&[entry("cursor", Vec::new())]), 0);
+        // Empty is not a produced document — collect_entries already fails
+        // before this helper when nothing is enabled.
+        assert_ne!(report_exit_code(&[]), 0);
     }
 
     fn custom_spec(id: &str, enabled: bool) -> crate::config::CustomProviderConfig {
@@ -1242,6 +1556,7 @@ mod tests {
             stale: false,
             last_error: None,
             fetched_at: Some(now),
+            display: Default::default(),
         }));
         let projected = entry_from_state(&tab, &state, now);
         assert_eq!(projected.id, "custom:mytool");

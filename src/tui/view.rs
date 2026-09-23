@@ -472,6 +472,7 @@ mod tests {
             stale: false,
             last_error: None,
             fetched_at,
+            display: Default::default(),
         }))
     }
 
@@ -615,6 +616,7 @@ mod tests {
                 stale: false,
                 last_error: None,
                 fetched_at: None,
+                display: Default::default(),
             })),
             ready_at(None),
         ]);

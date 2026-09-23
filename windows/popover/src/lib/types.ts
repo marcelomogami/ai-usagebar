@@ -12,7 +12,6 @@ export interface Layout {
   alwaysShowPace: boolean;
   cardOrder: string[];
   collapsed: Record<string, boolean>;
-  density: string;
   hidden: Record<string, boolean>;
   hideExtras: boolean;
   hintDismissed: boolean;
@@ -20,11 +19,19 @@ export interface Layout {
   rows: Record<string, RowPrefs>;
   seeded: boolean;
   showAs: string;
+  /** Provider id → starred metric keys (max 2). */
+  stars: Record<string, string[]>;
+  /** Menu-bar strip: compact bars glyph, or provider+values text. */
+  stripStyle: "bars" | "text";
   theme: string;
   timeFormat: TimeFormat;
 }
 
 export interface MetricRow {
+  /** The report's detail line; the hover text when `headline` is "value". */
+  detail: string;
+  /** Which number the headline shows: the percentage, or `value`. */
+  headline: "percent" | "value";
   key?: string;
   kind: "metric";
   label: string;
@@ -33,6 +40,8 @@ export interface MetricRow {
   resetAt: string;
   severity: string;
   usedPercent: number;
+  /** The report's value text; the headline when `headline` is "value" (a money figure). */
+  value: string;
   /** Reset window length in seconds; 0 when the host reports none. */
   window: number;
 }
@@ -62,7 +71,23 @@ export interface BlockRow {
   label: string;
 }
 
-export type Row = BlockRow | MetricRow | TextRow;
+export interface ResetCredit {
+  expiresAt: string;
+  title: string;
+}
+
+export interface ResetCredits {
+  available: number;
+  credits: ResetCredit[];
+}
+
+export interface ResetCreditsRow extends ResetCredits {
+  key?: string;
+  kind: "resetCredits";
+  label: string;
+}
+
+export type Row = BlockRow | MetricRow | ResetCreditsRow | TextRow;
 
 export interface ErrorAction {
   cmd: string;
@@ -81,6 +106,16 @@ export interface CardWarning {
   title: string;
 }
 
+export interface ResetCredit {
+  expiresAt: string;
+  title: string;
+}
+
+export interface ResetCredits {
+  available: number;
+  credits: ResetCredit[];
+}
+
 export interface Card {
   error: string;
   errorDetail: string;
@@ -88,6 +123,7 @@ export interface Card {
   errorTitle: string;
   id: string;
   plan: string;
+  resetCredits: ResetCredits | null;
   rows: Row[];
   stale: boolean;
   title: string;
@@ -96,6 +132,7 @@ export interface Card {
 
 export interface MetricSection {
   detail: string;
+  headline: "percent" | "value";
   label: string;
   percent: number;
   resetAt: string;
@@ -125,6 +162,7 @@ export interface Entry {
   error: string;
   id: string;
   plan: string;
+  resetCredits: ResetCredits | null;
   sections: Section[];
   shortName: string;
   stale: boolean;
@@ -147,6 +185,8 @@ export interface Payload {
   entries: Entry[];
   generatedAt: number;
   hostError: string;
+  /** Host OS: macos, windows, or linux. */
+  os: string;
   nextRefreshAt: number;
   primary: string;
   /** Host refresh interval; one of 1, 5 or 10. */
@@ -157,7 +197,9 @@ export interface Payload {
   update: UpdateInfo | null;
   updateCheckedAt: number;
   updates: UpdateMode;
+  /** GitHub repository this build was compiled from, or "". */
+  repository: string;
   version: string;
 }
 
-export type Screen = "customize" | "dashboard" | "provider" | "settings";
+export type Screen = "about" | "customize" | "dashboard" | "provider" | "settings";

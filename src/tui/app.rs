@@ -40,6 +40,12 @@ pub struct ReadyTab {
     /// timestamp stays stable across redraws instead of drifting with the
     /// passing wall clock.
     pub fetched_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Bar-number settings this vendor was configured with — the tank size a
+    /// prepaid balance is metered against, and which of the two numbers goes on
+    /// the bar. Resolved from config at fetch time rather than stored in the
+    /// snapshot, so editing config.toml takes effect on the next redraw instead
+    /// of waiting for the cache to expire.
+    pub display: crate::balance::DisplayPrefs,
 }
 
 /// Where a tab's usage comes from: a built-in vendor, or a user-declared
@@ -489,6 +495,12 @@ pub async fn refresh_one(client: &Client, config: &Config, tab: &TabId) -> TabSt
                     (code, crate::display::sanitize_untrusted_field(&message))
                 }),
                 fetched_at,
+                display: match &tab.source {
+                    TabSource::Builtin(vendor) => config.display_prefs(*vendor),
+                    // A `[[custom]]` provider states its own percentages; it has
+                    // no balance to meter and no headline to choose.
+                    TabSource::Custom { .. } => crate::balance::DisplayPrefs::default(),
+                },
             }))
         }
         Err(e) => TabState::error_with_plan(
@@ -766,6 +778,23 @@ async fn build_outcome(client: &Client, config: &Config, tab: &TabId) -> Result<
             .await?;
             Ok(outcome.into())
         }
+        VendorId::ModelStudio => {
+            // The bl CLI's own console session is the login; its region/site
+            // pair picks the gateway, and only a token fingerprint persists.
+            let creds = crate::modelstudio::resolve_credentials(&config.modelstudio)?;
+            let cache = crate::cache::Cache::for_vendor("modelstudio")?;
+            let endpoints =
+                crate::modelstudio::fetch::Endpoints::for_gateway(creds.region, creds.site);
+            let outcome = crate::modelstudio::fetch_snapshot_with(
+                client,
+                &creds,
+                &cache,
+                &endpoints,
+                DEFAULT_TTL,
+            )
+            .await?;
+            Ok(outcome.into())
+        }
         VendorId::Minimax => {
             let api_key = crate::config::resolve_api_key(
                 "MiniMax",
@@ -877,6 +906,24 @@ async fn build_outcome(client: &Client, config: &Config, tab: &TabId) -> Result<
                 client,
                 &api_key,
                 &config.ollama.plan,
+                &cache,
+                &endpoints,
+                DEFAULT_TTL,
+            )
+            .await?;
+            Ok(outcome.into())
+        }
+        VendorId::OrcaRouter => {
+            let api_key = crate::config::resolve_api_key(
+                "OrcaRouter",
+                &config.orcarouter.api_key_env,
+                config.orcarouter.api_key.as_deref(),
+            )?;
+            let cache = crate::cache::Cache::for_vendor("orcarouter")?;
+            let endpoints = crate::orcarouter::fetch::Endpoints::default();
+            let outcome = crate::orcarouter::fetch_snapshot(
+                client,
+                &api_key,
                 &cache,
                 &endpoints,
                 DEFAULT_TTL,
@@ -1040,6 +1087,7 @@ mod tests {
         config.openai.enabled = false;
         config.zai.enabled = false;
         config.openrouter.enabled = false;
+        config.commandcode.enabled = false;
         config.anthropic.accounts = labels
             .iter()
             .map(|l| crate::config::AnthropicAccount {
@@ -1067,6 +1115,7 @@ mod tests {
         empty.openai.enabled = false;
         empty.zai.enabled = false;
         empty.openrouter.enabled = false;
+        empty.commandcode.enabled = false;
         empty.anthropic.show_default_account = false;
         assert_eq!(
             tabs_from_config(&empty),
@@ -1104,6 +1153,7 @@ mod tests {
         config.anthropic.enabled = false;
         config.openai.enabled = false;
         config.zai.enabled = false;
+        config.commandcode.enabled = false;
         config.openrouter.accounts = vec![
             crate::config::OpenRouterAccount {
                 label: "work".into(),
@@ -1132,6 +1182,7 @@ mod tests {
         config.anthropic.enabled = false;
         config.zai.enabled = false;
         config.openrouter.enabled = false;
+        config.commandcode.enabled = false;
         config.openai.accounts.push(crate::config::OpenAiAccount {
             label: "work".into(),
             codex_auth_path: "/tmp/codex-work/auth.json".into(),
@@ -1151,6 +1202,7 @@ mod tests {
         config.anthropic.enabled = false;
         config.openai.enabled = false;
         config.zai.enabled = false;
+        config.commandcode.enabled = false;
         config.openrouter.show_default_account = false;
         assert_eq!(
             tabs_from_config(&config),
@@ -1185,6 +1237,7 @@ mod tests {
         config.openai.enabled = false;
         config.zai.enabled = false;
         config.openrouter.enabled = false;
+        config.commandcode.enabled = false;
         config.anthropic.accounts_dir = Some(td.path().to_path_buf());
 
         let tabs = tabs_from_config(&config);
@@ -1357,6 +1410,7 @@ mod tests {
             stale: false,
             last_error: None,
             fetched_at: Some(fetched_at),
+            display: Default::default(),
         }))
     }
 
