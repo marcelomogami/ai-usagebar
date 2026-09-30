@@ -1,6 +1,6 @@
 # ai-usagebar
 
-Native Omarchy Quattro panel, Waybar widget, and tabbed TUI for AI plan usage across **Claude**, **Codex/ChatGPT**, **GitHub Copilot**, **Z.AI (GLM)**, **OpenRouter**, **DeepSeek**, **Kimi**, **Nous Research**, **OpenCode Go**, **Command Code**, and other supported AI coding services.
+Native Omarchy Quattro panel, Waybar widget, and tabbed TUI for AI plan usage across **Claude**, **Codex/ChatGPT**, **GitHub Copilot**, **Z.AI (GLM)**, **OpenRouter**, **DeepSeek**, **DeepInfra**, **Kimi**, **Nous Research**, **OpenCode Go**, **Command Code**, and other supported AI coding services.
 
 ai-usagebar began as a Rust port of
 [`claudebar`](https://github.com/mryll/claudebar) and remains drop-in
@@ -23,14 +23,16 @@ codebase.
 - An optional Claude Code context view reads recent local session usage without
   scanning entire histories.
 - Native integrations are available for Omarchy, GNOME Shell, KDE Plasma 6,
-  and a macOS/Windows system-tray popover (`ai-usagebar-tray`).
+  and a macOS/Windows system-tray popover (`ai-usagebar-tray`). An experimental
+  GTK tray frontend for Linux Mint is in [`linux-mint/`](linux-mint/README.md).
 - One bar item can cycle through enabled providers. `[ui] primary` controls the
   initial provider in both the widget and TUI.
 - Atomic caches and file locking prevent duplicate requests from multi-monitor
   Waybar setups.
 - Quota-threshold desktop notifications are on by default: a window crossing
-  97% (configurable in `[notifications]`) raises one `notify-send` alert per
-  crossing on Linux, 100% counts as critical, and banked Codex/SuperGrok
+  97% (configurable in `[notifications]` or macOS Preferences) raises one
+  system alert per crossing on Linux and macOS. At 100% the limit is critical,
+  and banked Codex/SuperGrok
   reset credits warn 48h before expiring. Set `enabled = false` under
   `[notifications]` to turn them off — see the
   [configuration reference](docs/configuration.md#notifications).
@@ -47,6 +49,7 @@ codebase.
 
 - [Configuration](docs/configuration.md)
 - [Development guide](DEVELOPMENT.md)
+- [TUI mouse support](docs/tui-mouse-support.md)
 - [Windows build guide](docs/windows-build.md)
 - [Ollama Cloud integration](docs/ollama-setup.md)
 - [Claude accounts](docs/claude-accounts.md)
@@ -219,10 +222,17 @@ scoop bucket add akitaonrails https://github.com/akitaonrails/scoop-bucket
 scoop install ai-usagebar
 ```
 
-Scoop owns updates for Scoop installs (`scoop update ai-usagebar`); the
-tray's built-in updater applies to standalone ZIP installs.
+Scoop-installed trays update themselves through Scoop: **Install Update** (and
+**Automatic**) runs `scoop update ai-usagebar`, then the tray quits while Scoop
+replaces it — usually 10–60 seconds — and relaunches from Scoop's `current`
+path. The Scoop transcript is written to
+`%LOCALAPPDATA%\ai-usagebar\updates\scoop.log`; if Scoop does not deliver the
+requested version, the tray reports that log path and Automatic does not retry
+it in the background. A global Scoop install without the `scoop.ps1` shim
+keeps the release-page fallback. The tray's built-in updater applies to
+standalone ZIP installs.
 
-![Windows tray popover dashboard — provider cards for Claude, Codex, Cursor, SuperGrok and Antigravity with capsule meters, "used / Resets in" lines under each bar, pace notes such as "Limit in 2d 7h" and "~63% left at reset", and the footer with the AI Usage version, a "Next update in" countdown and the Options menu](screenshots/windows-tray-dashboard.png)
+![Windows tray popover dashboard — provider cards for Claude, Codex, Cursor, SuperGrok, Antigravity and Grok Bot with capsule meters, "used / Resets in" lines under each bar, pace notes such as "Limit in 1d 9h" and "~92% left at reset", an Antigravity card showing its sign-in error, and the footer with the AI Usage version, a "Next update in" countdown and the Options menu](screenshots/windows-tray-dashboard.png)
 
 Build with a standard Rust toolchain plus **Node.js 20+** (the tray WebView is
 a Vite app; `build.rs` runs `npm run build` on Windows). WebView2 Evergreen
@@ -235,8 +245,10 @@ cargo build --release
 ```
 
 Pin the icon in the Windows 11 notification overflow if it hides behind the
-chevron. Right-click the icon for Refresh, Detect Providers, Open TUI, Start
-with Windows, and Quit; left-click opens the popover. On its first run the
+chevron. Left-click opens the popover; right-click opens the same menu as
+the popover's Options — Customize (Classic only), Settings, Refresh, Detect
+Providers, Open TUI, Start at Login, Check for Updates, About, and Quit — in
+the popover's language. On its first run the
 tray detects which vendors already have a credential on this PC (local files
 and keys only, never the network) and turns exactly those on in
 `config.toml` — it never turns a vendor off. Settings adds a global shortcut
@@ -267,8 +279,9 @@ come from environment variables or `config.toml`.
 | Codex | OAuth, read from `~/.codex/auth.json` | Run `codex login` once. Token auto-refreshes. |
 | GitHub Copilot | GitHub CLI OAuth | Run `gh auth login --web`, then choose GitHub Copilot as the primary provider in Settings. ai-usagebar gets the token only with `gh auth token`; `GITHUB_COPILOT_TOKEN` is an optional explicit override. |
 | Z.AI | API key (`ZAI_API_KEY` env or `[zai] api_key` in config) | Set either. |
-| OpenRouter | API key (`OPENROUTER_API_KEY` env or `[openrouter] api_key` in config) | Set either. Named keys are supported. |
+| OpenRouter | API key (`OPENROUTER_API_KEY` env or `[openrouter] api_key` in config) | Set either. Multiple keys: one `[[openrouter.accounts]]` entry each. |
 | DeepSeek | API key (`DEEPSEEK_API_KEY` or config) | Set either and opt in. |
+| DeepInfra | API key (`DEEPINFRA_API_KEY` or config) | Set either and opt in. Reports prepaid balance and current-month spend. |
 | Kimi | Existing Kimi Code CLI login **or** API key (`KIMI_API_KEY` or config) | Opt in, then either log in with `kimi` (nothing to paste) or set an API key, which wins when present. A Kimi For Coding subscription can issue one at kimi.com/code/console. |
 | Kilo | API key (`KILO_API_KEY` env or `[kilo] api_key` in config) | Set either. Opt-in. For a team balance, also set `[kilo] organization_id`; omit it for the personal balance. |
 | Novita | API key (`NOVITA_API_KEY` env or `[novita] api_key` in config) | Set either. Opt-in. |
@@ -278,7 +291,7 @@ come from environment variables or `config.toml`.
 | SuperGrok | Existing `grok login` (its `auth.json` key, or its ACP extension) | Opt in, install Grok Build, and run `grok login`. This reports subscription usage — overall included credits plus per-product slices (Build, Chat, Imagine) — not the Management API balance. |
 | Grok Bot | Existing Grok Bot desktop sign-in (Linux and macOS) | Opt in, install the Grok Bot desktop app, and sign in to it once. This reports the app's weekly included-usage pool — not the Management API balance, and not the Grok Build subscription. Refreshed tokens stay in ai-usagebar's cache; the app's own file is never written. |
 | MiniMax | Token Plan subscription key | Opt in with `MINIMAX_API_KEY` or config. Choose the matching global or China region; pay-as-you-go keys do not work. |
-| Google Antigravity | Local Antigravity server, or the saved Google session | Opt in. The desktop products provide quota through their local server. The `agy` CLI currently requires a CSRF token it does not publish, so ai-usagebar uses the Google OAuth session saved in the OS keyring or `~/.gemini/antigravity-cli/antigravity-oauth-token` and asks the Cloud Code API instead. The TUI labels this fallback `Google API`. The same fallback applies when no product is running. |
+| Google Antigravity | Local Antigravity server, saved Google session, or `agy` status line | Opt in. The desktop products provide quota through their local server. The `agy` CLI can provide its live session quotas through the macOS status-line integration (see [Multiple Antigravity CLI accounts](#multiple-antigravity-cli-accounts-macos)); the existing saved-session Cloud Code API fallback remains available and is labelled `Google API` in the TUI. |
 | Cursor | Existing Cursor IDE or `cursor-agent` login | Opt in and sign in once. `cursor-agent` is the headless fallback. |
 | Kiro CLI | Existing kiro-cli login | Opt in and run `kiro-cli login` once. ai-usagebar refreshes the session when needed. |
 | Nous Research | OAuth device flow | Enable `[nous]`, click **Log in with Nous Research** in the Omarchy settings panel, or run `ai-usagebar auth nous login`. Credentials are kept in ai-usagebar's separate platform config directory (`~/.config/ai-usagebar/credentials.json` on Linux). |
@@ -318,10 +331,10 @@ subscription's billing period end.
 
 **There is no key to enter, and no key field in the settings panel.**
 Command Code appears in the provider selector but not in the key list, the same
-way Claude, Codex, Cursor and Kiro do. It is enabled by default like Codex; if
-no local credential exists, the TUI shows the tab as unavailable rather than
-silently omitting the provider. Set `enabled = false` under `[commandcode]` to
-hide it.
+way Claude, Codex, Cursor and Kiro do. It is disabled by default; a local login
+can auto-enable it, or you can set `enabled = true` under `[commandcode]`.
+If it appeared without a login after an earlier version, set `enabled = false`
+under `[commandcode]` to hide it.
 
 Credentials are reused, never issued. The OAuth token comes from
 `~/.commandcode/auth.json` from the official CLI first, then
@@ -355,7 +368,7 @@ rather than silently querying the wrong URL.
 
 #### Giving a prepaid balance a tank
 
-DeepSeek, Kilo, Novita, Moonshot and prepaid Grok report money **left** and no
+DeepSeek, DeepInfra, Kilo, Novita, Moonshot and prepaid Grok report money **left** and no
 denominator, so their row is a plain balance rather than a meter. Tell them how
 big the tank is and it becomes one:
 
@@ -376,7 +389,7 @@ take `headline`. Full rules in
 ### Enabling a vendor
 
 `enabled = true` is what makes a vendor fetch. Anthropic API, GitHub Copilot,
-DeepSeek, Kimi, Kilo, Novita, Moonshot, Grok, SuperGrok, Grok Bot, Antigravity,
+DeepSeek, DeepInfra, Kimi, Kilo, Novita, Moonshot, Grok, SuperGrok, Grok Bot, Antigravity,
 Cursor, MiniMax, and Kiro CLI all default to **disabled** so that existing
 installs are unaffected until you opt in. Use either method:
 
@@ -504,7 +517,11 @@ macOS's `security` tool to read and refresh the `Claude Code-credentials` item.
 
 ### macOS: repeated Keychain prompts for Claude Code (#148)
 
-**Affects every release up to and including 1.10.0, on macOS only.**
+**Affects every release up to and including 1.21.1, on macOS only.** Up to
+1.15.0 every token write-back was native; 1.16.0 through 1.21.1 still fell
+back to the native write when the credential did not fit the `security -i`
+line cap, which is the normal case once Claude Code stores `mcpOAuth` plugin
+state in the same item.
 
 When ai-usagebar refreshes the Claude OAuth token it writes the result back to
 the login Keychain through the native Security.framework API. That marks the
@@ -514,8 +531,9 @@ partition is `apple-tool:`, so from the next launch onward every read raises a
 Keychain permission dialog — once per `claude` process, which means bursts of
 them across subagents, `claude -p` jobs and IDE integrations.
 
-`securityd` logs it as `ACL partition mismatch`. **"Always Allow" does not
-help**: it edits the trusted-application list, not the partition list.
+`securityd` logs it as `ACL partition mismatch`. **"Always Allow" is only
+temporary**: with the Keychain password it does put `apple-tool:` back on the
+partition list, but ai-usagebar's next native write-back removes it again.
 
 To clear it, sign in to Claude Code again:
 
@@ -534,9 +552,12 @@ automatic refresh cycle, so nothing writes to the Keychain. An explicit
 `ai-usagebar --vendor anthropic` still fetches — `--vendor` overrides the
 enabled flag by design — so avoid that too while the workaround is in place.
 
-A fix — writing through `security(1)` so the writer and reader share a
-partition — is being worked on in [#148]. Linux is unaffected: there the
-credential is a file, not a Keychain item.
+The fix for [#148] makes every write go through `security(1)` — normal-sized
+blobs over `security -i` on stdin, larger ones (real once Claude Code stores
+`mcpOAuth` plugin state in the same item) as a `security add-generic-password`
+argument, the same fallback Claude Code uses — so writer and reader always
+share the `apple-tool:` partition. Linux is unaffected: there the credential
+is a file, not a Keychain item.
 
 [#148]: https://github.com/akitaonrails/ai-usagebar/issues/148
 
@@ -590,6 +611,7 @@ ai-usagebar --vendor copilot
 ai-usagebar --vendor zai
 ai-usagebar --vendor openrouter
 ai-usagebar --vendor deepseek
+ai-usagebar --vendor deepinfra
 ai-usagebar --vendor kimi
 ai-usagebar --vendor kiro
 
@@ -658,7 +680,14 @@ of the reset window in seconds. `window_secs` is present only when the vendor
 states the window (rolling 5h/7d windows; Cursor's billing cycle from
 `billingCycleStart`/`billingCycleEnd`, assumed to be 30 days when the start is
 missing) and is omitted, not `null`, otherwise — a calendar month or an unstated
-window gives a frontend nothing to pace against. Every metric row also carries
+window gives a frontend nothing to pace against. Cursor's On-Demand text row
+may also carry `used_cents`, `limit_cents`, and `percent`: the spend and the
+prepaid cap in USD cents, and how much of that cap is already used (rounded
+half up, and above 100 when spend passes the cap). Those fields are omitted,
+not `null`, when the row is ordinary text or when Cursor reported spend
+without a positive cap. A frontend meters the row from the numbers; `value`
+stays the formatted `$spent / $cap` string other surfaces print. Every metric
+row also carries
 `headline` — `"percent"` or `"value"` — naming which of its two numbers belongs
 on the bar; a frontend draws that one and leaves the other in the detail line,
 rather than inferring a balance row from its label. These fields are additive, so
@@ -678,6 +707,38 @@ ai-usagebar-tui                    # opens in your current terminal
 It works in Kitty, Alacritty, Foot, Ghostty, and other terminal emulators. The
 controls and Settings overlay are the same everywhere; no compositor or window
 manager integration is required.
+
+### TUI controls
+
+| Action | Keys | Mouse |
+|---|---|---|
+| Switch vendor tab | `↑` / `↓`, `Tab` / `Shift+Tab`, `←` / `→` | Click a sidebar entry |
+| Refresh current / all | `r` / `R` | Click the footer action |
+| Open Settings | `s` | Click the footer action |
+| Quit | `q` / `Esc` | Click the footer action |
+| Context view | `c` | — |
+
+In Settings, `↑`/`↓`/`Tab` move the focus ring, `←`/`→`/`space` change the
+focused control, `Ctrl-S` (or `Enter` on Save) saves, and `Esc` closes. Click
+a field to focus it, click an on/off cell to toggle it, and click the
+Primary vendor's name to open a picker popup (`↑`/`↓`, `Enter`/`space`,
+`Esc`; a click outside closes it).
+
+### Which vendors the Primary vendor picker offers
+
+The picker lists every vendor that can actually fetch data, not every vendor
+that exists:
+
+1. Vendors switched **on** in Providers.
+2. **GitHub Copilot** always (its credential lives in the GitHub CLI; there is
+   no local key to enable).
+3. Key vendors **off** but still reachable — a saved API key or an exported
+   env var (`env set (overrides)` in the API keys list).
+
+A vendor that is off with no credential is left out on purpose: choosing it as
+primary would produce a dashboard it cannot fetch from, and saving such a
+primary is blocked (`save_does_not_write_a_disabled_primary`). Turn a vendor
+on first; it then shows up in the picker.
 
 ## Native desktop integrations
 
@@ -721,17 +782,63 @@ The plugin depends only on the `ai-usagebar` executable. It runs the fixed
 only after a right-click. It installs no service, asks for no elevated
 privileges, and does not overwrite user configuration.
 
-### GNOME, KDE, macOS and Windows
+### macOS menu bar and Windows tray
+
+`ai-usagebar-tray` shows the same report in a popover that opens from the
+macOS menu bar or the Windows notification area. The **Popover Style** setting
+(Settings → Appearance) picks its look: **Classic** (the default, shown in the
+[Windows install](#windows) section) or **Native**, which follows Apple's
+macOS 26 UI kit on macOS and Fluent (WinUI 3, with Acrylic and the system
+accent) on Windows. Setup and controls: [macOS](macos/README.md),
+[Windows](windows/README.md).
+
+Native on Windows 11:
+
+| Light | Dark |
+|---|---|
+| <img src="screenshots/windows-tray-native-light.png" width="300" alt="Native popover on Windows 11, light: provider tabs with each provider's percentage, the Claude card with Weekly and Fable meters, and the Options button in the footer"> | <img src="screenshots/windows-tray-native-dark.png" width="300" alt="Native popover on Windows 11, dark, over Acrylic"> |
+| <img src="screenshots/windows-tray-native-settings-light.png" width="300" alt="Native Settings on Windows 11, light, on the General tab, with Providers and Preferences beside it"> | <img src="screenshots/windows-tray-native-settings-dark.png" width="300" alt="Native Settings on Windows 11, dark"> |
+
+| Native in Português | Right-click on the notification-area icon |
+|---|---|
+| <img src="screenshots/windows-tray-native-pt-br.png" width="300" alt="Native popover on Windows 11 in Brazilian Portuguese"> | <img src="screenshots/windows-tray-right-click-menu.png" width="254" alt="Native menu over the notification-area icon after a right-click: Customize, Settings, Refresh, Detect Providers, Open TUI, Start at Login, Check for Updates, About and Quit"> |
+
+Native on macOS 26:
+
+| Light | Dark |
+|---|---|
+| <img src="screenshots/macos-tray-native-light.png" width="300" alt="Native popover on macOS 26, light: segmented provider tabs, the Claude card with its Weekly meter, refresh and settings buttons at the top"> | <img src="screenshots/macos-tray-native-dark.png" width="300" alt="Native popover on macOS 26, dark"> |
+| <img src="screenshots/macos-tray-native-settings-light.png" width="300" alt="Native Settings on macOS 26, light, on the Preferences tab"> | <img src="screenshots/macos-tray-native-settings-dark.png" width="300" alt="Native Settings on macOS 26, dark: Appearance with Language, Theme, Popover Style and Time Format, and Usage Display below"> |
+
+| Options menu (Native) | Right-click on the menu bar icon | Classic |
+|---|---|---|
+| <img src="screenshots/macos-tray-native-options.png" width="300" alt="Options menu open on macOS: Settings, Refresh, Detect Providers, Open TUI, Start at Login, Check for Updates, About and Quit"> | <img src="screenshots/macos-tray-right-click-menu.png" width="180" alt="Native menu under the menu bar icon after a right-click: Customize, Settings, Refresh, Detect Providers, Open TUI, Start at Login (checked), Check for Updates, About and Quit"> | <img src="screenshots/macos-tray-classic-light.png" width="260" alt="Classic popover on macOS, light, with one card per provider"> |
+
+When a newer release is out, the dashboard shows it above the provider tabs
+(Native) or the cards (Classic), with Install Update where the tray can update
+itself:
+
+| Update available (macOS, Native) | Update available (Windows, Native) |
+|---|---|
+| <img src="screenshots/macos-tray-native-update-light.png" width="300" alt="Native popover on macOS with an Update available card above the provider tabs: AI Usage v1.27.0 is ready to install, with an Install Update button and a blue dot beside the version in the footer"> | <img src="screenshots/windows-tray-native-update-light.png" width="300" alt="Native popover on Windows 11 with the same Update available card and Install Update button above the provider tabs"> |
+| <img src="screenshots/macos-tray-native-update-dark.png" width="300" alt="The same Update available card on macOS, dark"> | <img src="screenshots/windows-tray-native-update-dark.png" width="300" alt="The same Update available card on Windows 11, dark"> |
+
+On macOS the menu bar item shows the starred metrics — Chart (default):
+<img src="screenshots/macos-menu-bar-chart.png" width="40" alt="Menu bar item in Chart mode"> ·
+Logos: <img src="screenshots/macos-menu-bar-logos.png" width="240" alt="Menu bar item in Logos mode: each starred provider's logo with its percentage">
+
+### Desktop integrations
 
 | Integration | Supported providers | Notes |
 |---|---|---|
-| [macOS menu bar](macos/README.md) | Whatever `usage --json` reports | `ai-usagebar-tray`: WKWebView popover + usage-chart glyph. |
-| [GNOME Shell](gnome-extension/README.md) | Claude, Codex, Z.AI, OpenRouter, DeepSeek, Google Antigravity | Antigravity's two quota pools appear as grouped rows. |
+| [macOS menu bar](macos/README.md) | Whatever `usage --json` reports | `ai-usagebar-tray`: WKWebView popover + each ready provider's name and usage with a chart glyph. |
+| [GNOME Shell](gnome-extension/README.md) | Menu: whatever `usage --json` reports. Top bar: Claude, Codex, Z.AI, OpenRouter, DeepSeek, Antigravity | Usage overview with native provider submenus and configurable appearance; the top bar follows its vendor preference. |
 | [KDE Plasma 6](kde-plasmoid/README.md) | Whatever `usage --json` reports | Provider tabs in the popup; vendor is per applet instance. |
+| [Linux Mint / Cinnamon](linux-mint/README.md) | Whatever `usage --json` reports | Experimental GTK dashboard with provider icons; left-click the status icon. |
 | [Windows tray](windows/README.md) | Whatever `usage --json` reports | NotifyIcon + WebView2 popover; left-click the tray icon. |
 
-Cursor is not available in the GNOME extension yet. On GNOME, use
-`ai-usagebar --vendor cursor` or open the TUI.
+The GNOME click menu includes Cursor when enabled in `config.toml`; the
+top bar still supports the providers listed in its preferences.
 
 ## Community integrations
 
@@ -880,14 +987,55 @@ Claude Desktop or CLI login. The dedicated
 - Waybar modules for personal and work subscriptions;
 - macOS Desktop and CLI switching, backups, and history conflicts.
 
+### Multiple Antigravity CLI accounts (macOS)
+
+If you keep separate `agy` terminal sessions signed into different Google
+accounts, install the official status-line integration once:
+
+```bash
+ai-usagebar antigravity setup-statusline
+```
+
+Restart existing `agy` terminals or run `/statusline` in them to reload the
+configuration. The popover and `ai-usagebar usage --json` then show one entry
+per distinct account with a live `agy` process; multiple terminals for the same
+account are deduplicated, and the number of entries follows the active
+accounts. Names use a masked address such as `j***@gmail.com`.
+Public account IDs are opaque and stable on this Mac; sessions remain listed
+while `agy` is running, with snapshots marked stale after 15 minutes without a
+new status-line payload.
+
+This integration reads only the CLI's status-line payload. It does not read,
+copy, or store OAuth tokens, prompts, project paths, or transcripts. When no
+valid `agy` status-line snapshot is available, the existing single-account
+Antigravity collector remains the fallback. To remove only AI UsageBar's own
+status line while preserving other Antigravity settings, run:
+
+```bash
+ai-usagebar antigravity remove-statusline
+```
+
+This multi-account integration is currently macOS-only.
+
 ### Multiple OpenRouter accounts
 
 Add one `[[openrouter.accounts]]` entry per key, then select it with
 `--vendor openrouter --account <label>`. Named accounts appear separately in
 the TUI, native integrations, and `usage` reports. Each has its own cache, so
-one key's fresh data cannot be shown for another. See the
+one key's fresh data cannot be shown for another. One entry per workspace is
+the pattern for several workspaces; keys inside one workspace share its
+billing account, so the split is per login session, not per key within a
+bill. See the
 [OpenRouter account guide](docs/openrouter-accounts.md) for the config and
 Waybar examples.
+
+### Multiple keys for other API-key providers
+
+Z.AI, DeepSeek, DeepInfra, Kilo, Novita, Moonshot, Grok, MiniMax, and OrcaRouter take the
+same array: one `[[<vendor>.accounts]]` entry per extra key, selected with
+`--vendor <vendor> --account <label>`. Region, team, organization, and display
+settings stay per provider. See the
+[API-key account guide](docs/api-key-accounts.md).
 
 ## Hyprland: float the TUI window
 
@@ -955,8 +1103,11 @@ make clippy                                        # cargo clippy -D warnings
 
 ![ai-usagebar-tui showing the Codex tab — 5h and weekly gauges, Credits block with message-count ranges, tabs at top, key hints in the footer](screenshots/tui-openai.png)
 
-- `Tab` / `l` / `→` — next tab
-- `Shift+Tab` / `h` / `←` — previous tab
+- `↑` / `↓` — move through the vendor menu (wraps; `Tab`/`l`/`→` and
+  `Shift+Tab`/`h`/`←` still work as secondary shortcuts)
+- Mouse — click a vendor menu entry to select it; click the footer's
+  `r`/`R`/`s`/`q`/`Esc` actions to refresh, refresh all, open Settings, or
+  quit; in Settings, click a field to focus it or click **Save** to save
 - `r` — refresh active tab
 - `R` — refresh all tabs
 - `s` — open Settings overlay (primary vendor + API keys)
@@ -1051,7 +1202,7 @@ After saving:
 ## Theming
 
 - One Dark palette by default.
-- Auto-merges with the active Omarchy theme at `~/.config/omarchy/current/theme/colors.toml`.
+- Auto-merges with the active Omarchy theme at `~/.local/state/omarchy/current/theme/colors.toml` (the older `~/.config/omarchy/current/theme/colors.toml` location is still read when that file is absent).
 - Per-color overrides: `--color-low`, `--color-mid`, `--color-high`, `--color-critical` (claudebar-compatible).
 
 ## Changelog

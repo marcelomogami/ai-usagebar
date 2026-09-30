@@ -7,14 +7,19 @@ export interface RowPrefs {
 }
 
 export type TimeFormat = "12" | "24" | "auto";
+export type Language = "en" | "pt-BR";
+export type PopoverStyle = "classic" | "native";
 
 export interface Layout {
   alwaysShowPace: boolean;
+  usageGoal: boolean;
   cardOrder: string[];
   collapsed: Record<string, boolean>;
   hidden: Record<string, boolean>;
   hideExtras: boolean;
   hintDismissed: boolean;
+  language: Language;
+  popoverStyle: PopoverStyle;
   resetTimes: string;
   rows: Record<string, RowPrefs>;
   seeded: boolean;
@@ -81,6 +86,15 @@ export interface ResetCredits {
   credits: ResetCredit[];
 }
 
+/** One line of a reset timeline: a banked credit's expiry, or a metric's next reset. */
+export interface ResetItem {
+  date: string;
+  remaining: string;
+  /** How soon a banked credit expires; "" for a metric reset or an unknown date. */
+  severity: "" | "blue" | "red" | "yellow";
+  title: string;
+}
+
 export interface ResetCreditsRow extends ResetCredits {
   key?: string;
   kind: "resetCredits";
@@ -132,6 +146,8 @@ export interface Card {
 
 export interface MetricSection {
   detail: string;
+  /** Sub-group heading this metric renders under ("" when it stands alone). */
+  group: string;
   headline: "percent" | "value";
   label: string;
   percent: number;
@@ -175,16 +191,62 @@ export type UpdateState = "available" | "checking" | "downloading" | "failed" | 
 
 export interface UpdateInfo {
   error: string;
+  /** The release ships this OS/arch and the install directory is writable. */
+  installable: boolean;
   state: UpdateState;
   /** Release page; only a `https://github.com/` URL is kept, else "". */
   url: string;
   version: string;
 }
 
+/** One vendor's switchable logins, as the macOS host reports them. */
+export interface AccountSwitchInfo {
+  /** Label of the login in use, or "" when it is not a managed account. */
+  active: string;
+  labels: string[];
+  /** Label of the last switch requested, running or finished. */
+  target: string;
+  switching: boolean;
+  /** Why that switch failed, or "". */
+  error: string;
+}
+
+/** The switch control on one account's card. */
+export interface CardAccount {
+  vendor: string;
+  label: string;
+  active: boolean;
+  /** A switch to this account is running. */
+  switching: boolean;
+  /** Another switch for this vendor is running, so this one must wait. */
+  busy: boolean;
+  /** Why the last switch to this account failed, or "". */
+  error: string;
+}
+
+/** What an update affordance does on click: a host command, or open `url`. */
+export interface UpdateAction {
+  busy: boolean;
+  cmd: "" | "check-update" | "install-update" | "open-url";
+  label: string;
+  url: string;
+}
+
+export interface Accent {
+  dark: string;
+  light: string;
+}
+
 export interface Payload {
+  /** Switchable logins keyed by vendor slug ("anthropic", "openai"); empty off macOS. */
+  accounts: Record<string, AccountSwitchInfo>;
+  accent: Accent | null;
   entries: Entry[];
   generatedAt: number;
   hostError: string;
+  menuBarChart: boolean;
+  notificationsEnabled: boolean;
+  notificationsThreshold: number;
   /** Host OS: macos, windows, or linux. */
   os: string;
   nextRefreshAt: number;

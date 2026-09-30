@@ -93,6 +93,10 @@ pub struct AnthropicSnapshot {
     pub scoped: Vec<ScopedWindow>,
     /// `None` when `extra_usage.is_enabled` is false or the block is absent.
     pub extra: Option<ExtraUsage>,
+    /// Banked limit resets from the `cedar_ember` block — the same idea as
+    /// Codex's rate-limit reset credits and SuperGrok's remaining resets.
+    /// Empty when the account has no grant or the endpoint withheld the block.
+    pub reset_credits: ResetCredits,
 }
 
 /// A usage window scoped to a specific model, labeled by the API
@@ -214,6 +218,33 @@ impl Default for DeepseekSnapshot {
             topped_up: 0.0,
             currency: String::new(),
         }
+    }
+}
+
+/// DeepInfra prepaid balance and current-month usage from the documented
+/// `/payment/checklist` and `/payment/usage` billing endpoints.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeepInfraSnapshot {
+    /// General-purpose prepaid credit remaining, in US dollars.
+    pub balance: f64,
+    /// Current calendar-month spend, in US dollars.
+    pub monthly_spend: f64,
+    /// Optional monthly spending limit, in US dollars.
+    pub monthly_limit: Option<f64>,
+    /// Usage period in the API's `YYYY.MM` form.
+    pub period: String,
+}
+
+impl Eq for DeepInfraSnapshot {}
+
+impl DeepInfraSnapshot {
+    pub fn monthly_consumed_pct(&self) -> Option<i32> {
+        let limit = self.monthly_limit.filter(|limit| *limit > 0.0)?;
+        Some(
+            ((self.monthly_spend / limit) * 100.0)
+                .round()
+                .clamp(0.0, 9999.0) as i32,
+        )
     }
 }
 
@@ -388,6 +419,7 @@ pub enum VendorSnapshot {
     Zai(ZaiSnapshot),
     Openrouter(OpenRouterSnapshot),
     Deepseek(DeepseekSnapshot),
+    Deepinfra(DeepInfraSnapshot),
     Kimi(KimiSnapshot),
     Kilo(KiloSnapshot),
     Novita(NovitaSnapshot),
@@ -410,6 +442,26 @@ pub enum VendorSnapshot {
     /// that fetched it holds the `CustomProviderConfig`, and the cache
     /// directory is keyed by its `id`.
     Custom(crate::custom::types::CustomSnapshot),
+}
+
+impl VendorSnapshot {
+    /// Banked, user-redeemable resets, for the vendors that have them.
+    ///
+    /// The one place this table lives. It had already been written twice —
+    /// once for the report's `reset_credits` field and once for the
+    /// expiry notifications — and adding a third provider to only one of them
+    /// is a silent half-feature: the sidebar lists a grant the notifier never
+    /// warns about. `None` is the honest answer for every other vendor; it is
+    /// not the same as an empty [`ResetCredits`], which means "this provider
+    /// banks resets and you currently hold none".
+    pub fn reset_credits(&self) -> Option<&ResetCredits> {
+        match self {
+            Self::Anthropic(snapshot) => Some(&snapshot.reset_credits),
+            Self::Openai(snapshot) => Some(&snapshot.reset_credits),
+            Self::SuperGrok(snapshot) => Some(&snapshot.reset_credits),
+            _ => None,
+        }
+    }
 }
 
 /// Google Antigravity 2.0 / CLI snapshot. The API groups models into Gemini
@@ -447,6 +499,8 @@ pub enum AntigravitySource {
     #[default]
     Local,
     Remote,
+    /// The running `agy` CLI's official status-line payload.
+    Statusline,
 }
 
 impl AntigravitySource {
@@ -454,6 +508,7 @@ impl AntigravitySource {
         match self {
             AntigravitySource::Local => "local",
             AntigravitySource::Remote => "remote",
+            AntigravitySource::Statusline => "statusline",
         }
     }
 
@@ -463,6 +518,7 @@ impl AntigravitySource {
         match s {
             "local" => Some(AntigravitySource::Local),
             "remote" => Some(AntigravitySource::Remote),
+            "statusline" => Some(AntigravitySource::Statusline),
             _ => None,
         }
     }
@@ -632,6 +688,10 @@ impl SuperGrokPeriod {
 pub struct GrokbotSnapshot {
     /// `grokPlanLabel`, falling back to `cursorPlanName`, then "Grok Bot".
     pub plan: String,
+    /// The subscription that bills the pool, from `billingBrand` and the plan
+    /// reported for it ("Cursor Ultra"). `None` for a brand not recognized yet,
+    /// which is left unnamed rather than guessed.
+    pub billed_by: Option<String>,
     /// `hasNonZeroIncludedLimit`. When false the account carries no included
     /// allowance at all — a distinct "no included allowance" state, never a
     /// fabricated 0% meter.
@@ -654,6 +714,13 @@ pub struct GrokbotSnapshot {
 }
 
 impl GrokbotSnapshot {
+    /// The plan a frontend shows: the subscription that bills the pool
+    /// ("Cursor Ultra") over the app's own label, which reads "Grok Bot Plan"
+    /// on every account.
+    pub fn display_plan(&self) -> &str {
+        self.billed_by.as_deref().unwrap_or(&self.plan)
+    }
+
     /// At 100% of the included pool, `hasAvailableUsage` can still be true
     /// because on-demand keeps serving — say so, but only when the account
     /// actually has on-demand switched on.
@@ -740,6 +807,23 @@ pub struct ResetCredit {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// A provider's own label for a banked reset, rendered verbatim in Pango bar
+/// markup and in the `;;`-delimited desktop FORMAT protocol. Both vendors that
+/// carry one gate it here rather than each keeping a copy: an over-long or
+/// control-character-bearing title is dropped, leaving the expiry line alone,
+/// which still says everything the user has to act on.
+pub fn checked_reset_title(value: Option<String>) -> Option<String> {
+    const MAX_RESET_TITLE_CHARS: usize = 80;
+    let value = value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    if value.chars().count() > MAX_RESET_TITLE_CHARS || value.chars().any(char::is_control) {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 impl ResetCredits {
@@ -987,6 +1071,7 @@ mod tests {
                 currency: None,
                 decimal_places: Some(2),
             }),
+            reset_credits: Default::default(),
         }
     }
 

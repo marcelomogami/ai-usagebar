@@ -5,20 +5,28 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use fs2::FileExt;
-use objc2::Message;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, Bool};
+use objc2::runtime::{AnyClass, AnyObject, Bool};
+use objc2::{AnyThread, Message};
 use objc2_app_kit::{
-    NSApplication, NSBezierPath, NSButton, NSColor, NSEvent, NSImage, NSImageScaling, NSScreen,
-    NSView, NSWindow,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSColor,
+    NSCompositingOperation, NSEvent, NSFont, NSFontAttributeName, NSFontWeightSemibold,
+    NSForegroundColorAttributeName, NSGlassEffectView, NSGlassEffectViewStyle, NSImage,
+    NSImageScaling, NSScreen, NSStringDrawing, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
+    NSWindowOrderingMode,
 };
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    MainThreadMarker, NSAttributedStringKey, NSData, NSDictionary, NSPoint, NSRect, NSSize,
+    NSString,
+};
 use objc2_quartz_core::kCACornerCurveContinuous;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
@@ -26,7 +34,7 @@ use tao::platform::macos::{
     ActivationPolicy, EventLoopExtMacOS, WindowBuilderExtMacOS, WindowExtMacOS,
 };
 use tao::window::{Window, WindowBuilder};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{ContextMenu, Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use wry::http::{Request, Response, StatusCode, header::CONTENT_TYPE};
 use wry::{WebView, WebViewBuilder, WebViewBuilderExtDarwin};
@@ -34,59 +42,79 @@ use wry::{WebView, WebViewBuilder, WebViewBuilderExtDarwin};
 use super::browse;
 use super::hotkey::{self, HotkeyBinding};
 use super::icon::{Severity, tray_icon_rgba};
+use super::marks;
+use super::menu_bar::{self, LogoSegment, StatusItemContent};
+use super::options_menu::{self, OptionsAction, OptionsLabels};
 use super::panel::{
-    CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, DARK_BACKGROUND, FALLBACK_WORK_AREA_HEIGHT,
-    LIGHT_BACKGROUND, PopoverPlacement, WINDOW_HEIGHT, WINDOW_WIDTH, clamp_popover_height,
-    cocoa_popover_frame, menu_bar_bottom_y,
+    CLICK_LOCK_MS, CORNER_RADIUS, CocoaRect, FALLBACK_WORK_AREA_HEIGHT, PopoverPlacement,
+    WINDOW_HEIGHT, WINDOW_WIDTH, clamp_popover_height, cocoa_popover_frame, menu_bar_bottom_y,
 };
-use super::payload::{HostFacts, UpdateFact, fact_after_check, host_payload, wrap_report};
+use super::payload::{
+    AccountSwitchFact, HostFacts, SharedFacts, facts_snapshot, host_payload, with_facts,
+    wrap_report,
+};
 use super::strip::{
-    BARS_PIXEL_SIDE, BARS_POINT_SIDE, Stars, StripStyle, bar_fill, bars_layout, bars_rgba,
+    BARS_PIXEL_SIDE, BARS_POINT_SIDE, Stars, bar_fill, bars_layout, bars_rgba,
     content_from_payload, parse_strip_ipc,
 };
-use super::update_flow;
-use super::{startup, tui_launch};
-use crate::config::Config;
+use super::style::PopoverStyle;
+use super::updates::Updates;
+use super::{RELAUNCH_ENV, now_ms, startup, tui_launch, update_flow};
+use crate::config::{Config, UpdateMode};
+use crate::update::{current_os, sweep_old};
 
 const INDEX_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/popover/index.html"));
 const POPOVER_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/popover/popover.css"));
 const POPOVER_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/popover/popover.js"));
 
+/// How long a relaunched process keeps retrying the lock.
+const RELAUNCH_WAIT: Duration = Duration::from_secs(10);
+
 enum UserEvent {
     Tray(TrayIconEvent),
+    /// A fallback-menu item fired (#249); only attached when the webview is absent.
     Menu(MenuEvent),
     Ipc(String),
     Report(Value),
-    Entry(Value),
     FocusPopover,
     Hotkey,
     Facts,
+    /// An update is ready: start the verified exe and quit, or, with `None`, just quit because
+    /// Scoop's script installs the update and starts the new tray itself.
+    Restart(Option<PathBuf>),
 }
 
 enum WorkerCmd {
     Refresh,
-    RefreshEntry(String),
     Detect,
-    CheckUpdate,
+    CheckUpdate { manual: bool },
+    InstallUpdate,
+    SnoozeUpdate,
+    SetUpdates(UpdateMode),
     Shutdown,
-}
-
-type SharedFacts = Arc<Mutex<HostFacts>>;
-
-fn facts_snapshot(facts: &SharedFacts) -> HostFacts {
-    facts.lock().map(|f| f.clone()).unwrap_or_default()
-}
-
-fn with_facts(facts: &SharedFacts, edit: impl FnOnce(&mut HostFacts)) {
-    if let Ok(mut guard) = facts.lock() {
-        edit(&mut guard);
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Theme {
     Light,
     Dark,
+}
+
+/// Cache key for the native provider-logo image; only visible strip inputs matter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogoStripKey {
+    segments: Vec<LogoSegment>,
+    line_counts: Vec<usize>,
+}
+
+/// One premeasured provider segment captured by the AppKit drawing block.
+struct LogoStripItem {
+    mark: Option<Retained<NSImage>>,
+    fallback_name: Retained<NSString>,
+    values: Vec<Retained<NSString>>,
+    label_width: f64,
+    value_width: f64,
+    line_count: usize,
 }
 
 impl Theme {
@@ -97,20 +125,12 @@ impl Theme {
             _ => None,
         }
     }
-
-    fn background(self) -> (u8, u8, u8, u8) {
-        match self {
-            Self::Light => LIGHT_BACKGROUND,
-            Self::Dark => DARK_BACKGROUND,
-        }
-    }
 }
 
-struct MenuItems {
+/// Items of the emergency menu (#249), kept alive so their ids can be matched
+/// against incoming `MenuEvent`s. Built only by [`attach_fallback_menu`].
+struct FallbackMenu {
     refresh: MenuItem,
-    detect: MenuItem,
-    open_tui: MenuItem,
-    startup: CheckMenuItem,
     quit: MenuItem,
 }
 
@@ -118,7 +138,16 @@ struct TrayState {
     window: Window,
     webview: Option<WebView>,
     tray: TrayIcon,
-    menu: MenuItems,
+    /// Emergency status-item menu, attached only when `webview` is `None`
+    /// (#249): an accessory app has no app menu, so this is the only quit
+    /// affordance when the popover cannot be built.
+    fallback_menu: Option<FallbackMenu>,
+    /// Labels for the right-click Options menu; the popover refreshes them by
+    /// language with the `menu-labels` IPC.
+    menu_labels: OptionsLabels,
+    /// A right-click screen choice made before the popover's `ready`: the hook
+    /// only exists after it, so the choice waits for `ready` to run.
+    pending_menu_action: Option<&'static str>,
     worker: mpsc::Sender<WorkerCmd>,
     proxy: EventLoopProxy<UserEvent>,
     payload: Value,
@@ -132,15 +161,24 @@ struct TrayState {
     /// `inner_size / scale_factor`, which is wrong after a scale-factor change.
     popover_height: f64,
     theme: Theme,
+    /// Last style the page reported; the AppKit material view shows only for `Native`.
+    style: PopoverStyle,
+    /// The AppKit material behind WKWebView, hidden while the style is Classic.
+    native_background: Option<Retained<NSView>>,
     facts: SharedFacts,
     hotkey: Option<HotkeyBinding>,
-    strip_style: StripStyle,
     stars: Stars,
     strip_order: Vec<String>,
+    strip_order_known: bool,
+    menu_bar_chart: bool,
+    menu_bar_logo_key: Option<LogoStripKey>,
+    notifications_enabled: bool,
+    notifications_threshold: u8,
 }
 
 pub fn run() -> i32 {
-    let Some(_lock) = SingleInstance::acquire() else {
+    let relaunched = std::env::var_os(RELAUNCH_ENV).is_some();
+    let Some(_lock) = SingleInstance::acquire_waiting(relaunched) else {
         return 0;
     };
     if let Err(error) = run_loop() {
@@ -161,13 +199,14 @@ fn run_loop() -> Result<(), String> {
             let _ = proxy.send_event(UserEvent::Tray(event));
         }));
     }
+    // The fallback menu (#249) delivers its selections here, the same shared
+    // muda channel the Windows host's context menu uses.
     {
         let proxy = proxy.clone();
         MenuEvent::set_event_handler(Some(move |event| {
             let _ = proxy.send_event(UserEvent::Menu(event));
         }));
     }
-
     let window = WindowBuilder::new()
         .with_title("AI Usage")
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -195,24 +234,39 @@ fn run_loop() -> Result<(), String> {
         let outcome = bind_shortcut(hotkey_binding.as_mut(), configured);
         with_facts(&facts, |f| apply_shortcut_outcome(f, outcome));
     }
+    // Leftovers from the swap that put this binary in place.
+    if let Ok(dir) = update_flow::install_dir() {
+        let _ = sweep_old(&dir, current_os());
+    }
     let (cmd_tx, cmd_rx) = mpsc::channel();
     spawn_worker(proxy.clone(), cmd_rx, facts.clone());
     let _ = cmd_tx.send(WorkerCmd::Refresh);
 
     let empty = wrap_report("{}", &facts_snapshot(&facts), now_ms(), None);
-    let menu = build_menu(startup::is_enabled());
-    let context_menu = make_menu(&menu);
-    let tray = build_tray(context_menu)?;
+    let menu_bar_chart = config.tray.menu_bar_style.as_deref() != Some("provider");
+    let tray = build_tray()?;
 
     let theme = Theme::Light;
-    let webview = build_webview(&window, proxy.clone(), theme).ok();
+    let webview = build_webview(&window, proxy.clone()).ok();
+    // #249: when the WKWebView could not be built there is no popover, and an
+    // accessory app has no app menu — attach the emergency menu so the status
+    // item still offers Refresh and a clean Quit. Normal operation never
+    // attaches one (see `build_tray`).
+    let fallback_menu = if menu_bar::fallback_menu_attached(webview.is_some()) {
+        Some(attach_fallback_menu(&tray))
+    } else {
+        None
+    };
     round_corners(&window);
+    let native_background = install_native_background(&window);
 
     let mut state = TrayState {
         window,
         webview,
         tray,
-        menu,
+        fallback_menu,
+        menu_labels: OptionsLabels::default(),
+        pending_menu_action: None,
         worker: cmd_tx,
         proxy: proxy.clone(),
         payload: empty,
@@ -222,11 +276,17 @@ fn run_loop() -> Result<(), String> {
         last_anchor: None,
         popover_height: WINDOW_HEIGHT,
         theme,
+        style: PopoverStyle::Classic,
+        native_background,
         facts,
         hotkey: hotkey_binding,
-        strip_style: StripStyle::Bars,
         stars: Stars::new(),
         strip_order: Vec::new(),
+        strip_order_known: false,
+        menu_bar_chart,
+        menu_bar_logo_key: None,
+        notifications_enabled: config.notifications.enabled,
+        notifications_threshold: config.notifications.threshold,
     };
     apply_strip_icon(&mut state);
 
@@ -239,9 +299,14 @@ fn run_loop() -> Result<(), String> {
             }
             Event::UserEvent(UserEvent::Ipc(body)) => handle_ipc(&mut state, &body, control_flow),
             Event::UserEvent(UserEvent::Report(payload)) => apply_payload(&mut state, payload),
-            Event::UserEvent(UserEvent::Entry(entry)) => apply_entry(&mut state, entry),
             Event::UserEvent(UserEvent::Facts) => apply_facts(&mut state),
             Event::UserEvent(UserEvent::Hotkey) => toggle_popover_from_keyboard(&mut state),
+            Event::UserEvent(UserEvent::Restart(exe)) => {
+                if let Some(exe) = exe {
+                    relaunch(&exe);
+                }
+                *control_flow = ControlFlow::Exit;
+            }
             Event::UserEvent(UserEvent::FocusPopover) => {
                 if state.popover_open {
                     guard_blur(&mut state);
@@ -283,8 +348,24 @@ fn spawn_worker(
                 return;
             };
             run_detection(false);
+            let mut updates = {
+                let announce = proxy.clone();
+                let restart = proxy.clone();
+                Updates::new(
+                    facts.clone(),
+                    Box::new(move || {
+                        let _ = announce.send_event(UserEvent::Facts);
+                    }),
+                    Box::new(move |exe| {
+                        let _ = restart.send_event(UserEvent::Restart(exe));
+                    }),
+                )
+            };
             loop {
                 rt.block_on(push_report(&proxy, &facts));
+                if updates.due() {
+                    rt.block_on(updates.check(false));
+                }
                 let deadline =
                     Instant::now() + Duration::from_secs(facts_snapshot(&facts).refresh_secs);
                 loop {
@@ -295,12 +376,12 @@ fn spawn_worker(
                             run_detection(true);
                             break;
                         }
-                        Ok(WorkerCmd::RefreshEntry(id)) => {
-                            rt.block_on(push_entry(&proxy, &id));
+                        Ok(WorkerCmd::CheckUpdate { manual }) => {
+                            rt.block_on(updates.check(manual));
                         }
-                        Ok(WorkerCmd::CheckUpdate) => {
-                            rt.block_on(check_release(&proxy, &facts));
-                        }
+                        Ok(WorkerCmd::InstallUpdate) => rt.block_on(updates.install_or_check()),
+                        Ok(WorkerCmd::SnoozeUpdate) => updates.snooze(),
+                        Ok(WorkerCmd::SetUpdates(mode)) => rt.block_on(updates.set_mode(mode)),
                         Ok(WorkerCmd::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                             return;
                         }
@@ -319,11 +400,111 @@ fn run_detection(force: bool) {
 
 fn host_facts(config: &Config) -> HostFacts {
     let mut facts = HostFacts::new(env!("CARGO_PKG_VERSION"), startup::is_enabled());
+    facts.updates = config.tray.updates().as_str().into();
     facts.refresh_secs = config.tray.refresh_minutes() * 60;
+    facts.accounts = account_facts(config);
     facts
 }
 
+/// Which Claude CLI and Codex logins are active, for the switch control on
+/// each account's card. Read fresh on every report, so a switch made from the
+/// terminal shows up too.
+fn account_facts(config: &Config) -> Vec<AccountSwitchFact> {
+    let mut out = Vec::new();
+    let claude = config.anthropic.all_accounts();
+    if config.anthropic.enabled && !claude.is_empty() {
+        let active = crate::anthropic::cli_account::home_claude_json()
+            .ok()
+            .and_then(|home| crate::anthropic::cli_account::resolve_active_label(&home, &claude));
+        out.push(AccountSwitchFact {
+            vendor: "anthropic".into(),
+            active,
+            labels: claude.iter().map(|account| account.label.clone()).collect(),
+            ..AccountSwitchFact::default()
+        });
+    }
+    let codex = &config.openai.accounts;
+    if config.openai.enabled && !codex.is_empty() {
+        let active = config
+            .openai
+            .resolve_auth_path(None)
+            .ok()
+            .and_then(|default| crate::openai::account::resolve_active_label(&default, codex));
+        out.push(AccountSwitchFact {
+            vendor: "openai".into(),
+            active,
+            labels: codex.iter().map(|account| account.label.clone()).collect(),
+            ..AccountSwitchFact::default()
+        });
+    }
+    out
+}
+
+/// Replace the account facts with a fresh read, keeping any running switch
+/// and the last error attached to their vendor.
+fn refresh_account_facts(facts: &SharedFacts) {
+    let fresh = account_facts(&Config::load().unwrap_or_default());
+    with_facts(facts, |f| {
+        f.accounts = fresh
+            .into_iter()
+            .map(|mut fact| {
+                if let Some(old) = f.accounts.iter().find(|old| old.vendor == fact.vendor) {
+                    fact.target.clone_from(&old.target);
+                    fact.switching = old.switching;
+                    fact.error.clone_from(&old.error);
+                }
+                fact
+            })
+            .collect();
+    });
+}
+
+/// Run `account switch` out of process, through this binary's `account` mode,
+/// exactly as a terminal would: the Claude half may quit and reopen the Desktop app, and its errors
+/// arrive on stderr, which becomes the card's message. Runs on its own thread,
+/// so a slow switch never holds up the refresh worker; the switch is a
+/// transaction with its own rollback, so it is left to finish rather than
+/// killed on a timer.
+fn run_account_switch(facts: &SharedFacts, vendor: &str, label: &str) {
+    let error = match std::env::current_exe() {
+        Ok(tray) => switch_with(&tray, vendor, label),
+        Err(error) => format!("could not locate the running tray binary: {error}"),
+    };
+    with_facts(facts, |f| {
+        for fact in f.accounts.iter_mut().filter(|fact| fact.vendor == vendor) {
+            fact.switching = false;
+            fact.error.clone_from(&error);
+        }
+    });
+}
+
+/// The switch itself, run by this tray binary in its `account` mode (see
+/// `src/bin/ai-usagebar-tray.rs`); returns the error to show, or empty on
+/// success.
+fn switch_with(tray: &std::path::Path, vendor: &str, label: &str) -> String {
+    let mut command = std::process::Command::new(tray);
+    command.args(["account", "switch", "--yes"]);
+    if vendor == "openai" {
+        command.arg("--codex");
+    }
+    command.arg("--").arg(label);
+    match command.stdin(std::process::Stdio::null()).output() {
+        Ok(output) if output.status.success() => String::new(),
+        Ok(output) => String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .map(|line| {
+                line.trim_start_matches("ai-usagebar account switch: ")
+                    .to_string()
+            })
+            .unwrap_or_else(|| format!("account switch exited with {}", output.status)),
+        Err(error) => format!("could not run the account switch: {error}"),
+    }
+}
+
 async fn push_report(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts) {
+    refresh_account_facts(facts);
     let mut snapshot = facts_snapshot(facts);
     snapshot.startup_enabled = startup::is_enabled();
     let now = now_ms();
@@ -332,48 +513,6 @@ async fn push_report(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts) {
         Err(error) => wrap_report("{}", &snapshot, now, Some(&error)),
     };
     let _ = proxy.send_event(UserEvent::Report(payload));
-}
-
-/// Manual GitHub release check. No install on macOS — the About screen opens
-/// the release page when a newer tag exists.
-async fn check_release(proxy: &EventLoopProxy<UserEvent>, facts: &SharedFacts) {
-    with_facts(facts, |f| {
-        f.update = Some(UpdateFact {
-            error: String::new(),
-            state: "checking".into(),
-            url: String::new(),
-            version: String::new(),
-        });
-    });
-    let _ = proxy.send_event(UserEvent::Facts);
-    let outcome = match update_flow::http_client() {
-        Ok(client) => update_flow::check(&client, env!("CARGO_PKG_VERSION")).await,
-        Err(error) => Err(error),
-    };
-    let checked_at = now_ms();
-    let fact = fact_after_check(outcome);
-    with_facts(facts, |f| {
-        f.update_checked_at = checked_at;
-        f.update = fact;
-    });
-    let _ = proxy.send_event(UserEvent::Facts);
-}
-
-async fn push_entry(proxy: &EventLoopProxy<UserEvent>, id: &str) {
-    let entry = match crate::report::collect_entry_json(id).await {
-        Ok(json) => serde_json::from_str::<Value>(&json)
-            .ok()
-            .and_then(|v| v.get("entries")?.as_array()?.first().cloned()),
-        Err(error) => Some(serde_json::json!({
-            "id": id,
-            "status": "error",
-            "error": crate::display::sanitize_untrusted_field(&error),
-            "sections": [],
-        })),
-    };
-    if let Some(entry) = entry {
-        let _ = proxy.send_event(UserEvent::Entry(entry));
-    }
 }
 
 fn apply_payload(state: &mut TrayState, payload: Value) {
@@ -400,6 +539,7 @@ fn stamp_facts(state: &mut TrayState) {
         "update_checked_at",
         "repository",
         "version",
+        "accounts",
     ] {
         obj.insert(key.into(), stamped[key].clone());
     }
@@ -412,56 +552,48 @@ fn apply_facts(state: &mut TrayState) {
     }
 }
 
-fn apply_entry(state: &mut TrayState, entry: Value) {
-    let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
-        return;
-    };
-    let Some(entries) = state
-        .payload
-        .get_mut("entries")
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
-    match entries
-        .iter_mut()
-        .find(|e| e.get("id").and_then(Value::as_str) == Some(id.as_str()))
-    {
-        Some(slot) => *slot = entry,
-        None => entries.push(entry),
-    }
-    apply_strip_icon(state);
-    if state.js_ready {
-        push_to_webview(state);
-    }
-}
-
 fn apply_strip_icon(state: &mut TrayState) {
     let content = content_from_payload(&state.payload, &state.stars, &state.strip_order);
-    match state.strip_style {
-        StripStyle::Bars => {
-            let fractions: Vec<f64> = content.bars.iter().map(|m| m.fraction).collect();
-            // Keep tray-icon's slot filled so the status item stays allocated,
-            // then replace the image with a 1×/2×/3× template that stays sharp
-            // on mixed-DPI monitors.
+    let tooltip = menu_bar::tooltip(&content);
+    let _ = state.tray.set_tooltip(Some(tooltip.as_str()));
+    state.tray.set_title(Some(""));
+    let segments = menu_bar::logo_segments(&content, &state.payload);
+    let has_content = if state.menu_bar_chart {
+        !content.bars.is_empty()
+    } else {
+        !segments.is_empty()
+    };
+    match menu_bar::status_item_content(state.menu_bar_chart, has_content) {
+        StatusItemContent::AppIcon => {
+            state.menu_bar_logo_key = None;
+            set_static_status_icon(state);
+        }
+        StatusItemContent::Chart => {
+            state.menu_bar_logo_key = None;
+            let fractions: Vec<f64> = content.bars.iter().map(|metric| metric.fraction).collect();
             if let Ok(icon) = bars_icon(&fractions) {
                 let _ = state.tray.set_icon(Some(icon));
             }
             state.tray.set_icon_as_template(true);
-            state.tray.set_title(None::<&str>);
             if let Some(image) = template_bars_image(&fractions) {
-                set_status_button_image(&image);
+                set_status_button_image(Some(&image));
             }
         }
-        StripStyle::Text => {
-            if let Ok(icon) = static_icon() {
-                let _ = state.tray.set_icon(Some(icon));
+        StatusItemContent::Logos => {
+            let key = LogoStripKey {
+                line_counts: segments
+                    .iter()
+                    .map(|segment| segment.values.len())
+                    .collect(),
+                segments: segments.clone(),
+            };
+            if state.menu_bar_logo_key.as_ref() != Some(&key) {
+                let image = logo_strip_image(&segments);
+                let _ = state.tray.set_icon(None);
+                state.tray.set_icon_as_template(true);
+                set_status_button_image(Some(&image));
+                state.menu_bar_logo_key = Some(key);
             }
-            state.tray.set_icon_as_template(true);
-            let title = content.title_line();
-            state
-                .tray
-                .set_title((!title.is_empty()).then_some(title.as_str()));
         }
     }
 }
@@ -474,6 +606,15 @@ fn bars_icon(fractions: &[f64]) -> Result<Icon, tray_icon::BadIcon> {
 fn static_icon() -> Result<Icon, tray_icon::BadIcon> {
     let (rgba, size) = tray_icon_rgba(BARS_PIXEL_SIDE, Severity::Low);
     Icon::from_rgba(rgba, size, size)
+}
+
+fn set_static_status_icon(state: &mut TrayState) {
+    let _ = state.tray.set_icon(None);
+    set_status_button_image(None);
+    if let Ok(icon) = static_icon() {
+        let _ = state.tray.set_icon(Some(icon));
+    }
+    state.tray.set_icon_as_template(true);
 }
 
 enum ShortcutOutcome {
@@ -551,6 +692,28 @@ fn set_shortcut(state: &mut TrayState, value: &str) {
     apply_facts(state);
 }
 
+fn set_updates(state: &mut TrayState, mode_text: &str) {
+    let Some(mode) = UpdateMode::parse(mode_text) else {
+        return;
+    };
+    if let Some(path) = config_path() {
+        let _ = crate::config::set_tray_value(&path, "updates", Some(mode.as_str().into()));
+    }
+    let _ = state.worker.send(WorkerCmd::SetUpdates(mode));
+}
+
+/// Start the freshly swapped binary and let it wait for our lock
+/// (`RELAUNCH_ENV`). Its own process group is what lets it outlive us: when a
+/// LaunchAgent job's process exits, launchd kills the rest of the job's
+/// process group, and "Start at Login" runs the tray as exactly such a job.
+fn relaunch(exe: &std::path::Path) {
+    use std::os::unix::process::CommandExt;
+    let _ = std::process::Command::new(exe)
+        .env(RELAUNCH_ENV, "1")
+        .process_group(0)
+        .spawn();
+}
+
 fn set_refresh(state: &mut TrayState, minutes: u64) {
     if !crate::config::TRAY_REFRESH_MINUTES.contains(&minutes) {
         return;
@@ -571,38 +734,157 @@ fn push_to_webview(state: &TrayState) {
     let Some(webview) = state.webview.as_ref() else {
         return;
     };
-    let json = host_payload(&state.payload);
+    let json = popover_payload(state);
     let script = format!("window.__AIUB_APPLY__ && window.__AIUB_APPLY__({json})");
     let _ = webview.evaluate_script(&script);
 }
 
+fn popover_payload(state: &TrayState) -> String {
+    let mut payload = state.payload.clone();
+    payload["menu_bar_chart"] = json!(state.menu_bar_chart);
+    payload["notifications_enabled"] = json!(state.notifications_enabled);
+    payload["notifications_threshold"] = json!(state.notifications_threshold);
+    host_payload(&payload)
+}
+
 fn handle_tray(state: &mut TrayState, event: TrayIconEvent) {
+    // With the fallback menu attached (#249) AppKit routes clicks to the menu
+    // and there is no popover to toggle; anything that still arrives here is
+    // ignored rather than flashing an empty window.
+    if state.fallback_menu.is_some() {
+        return;
+    }
     if let TrayIconEvent::Click {
-        button: MouseButton::Left,
+        button,
         button_state: MouseButtonState::Up,
         ..
     } = event
     {
-        if state.popover_open {
-            hide_popover(state);
-        } else {
-            state.last_anchor = Some(cocoa_mouse());
-            show_popover(state);
+        match button {
+            MouseButton::Left => {
+                if state.popover_open {
+                    hide_popover(state);
+                } else {
+                    state.last_anchor = Some(cocoa_mouse());
+                    show_popover(state);
+                }
+            }
+            MouseButton::Right => {
+                // Close first so the menu does not land on the open panel; the
+                // anchor also feeds `show_popover` if a screen item reopens it.
+                if state.popover_open {
+                    hide_popover(state);
+                }
+                state.last_anchor = Some(cocoa_mouse());
+                show_options_menu(state);
+            }
+            MouseButton::Middle => {}
         }
     }
 }
 
+/// A menu selection: the fallback menu (#249) keeps its own routing, and the
+/// right-click Options menu routes through the shared action ids. Quit exits
+/// the event loop — the same path the popover's own Quit control takes
+/// ("quit" IPC → `ControlFlow::Exit`), so `LoopDestroyed` still shuts the
+/// worker down cleanly instead of leaving it mid-fetch.
 fn handle_menu(state: &mut TrayState, event: &MenuEvent, control_flow: &mut ControlFlow) {
-    if event.id == state.menu.refresh.id() {
-        let _ = state.worker.send(WorkerCmd::Refresh);
-    } else if event.id == state.menu.detect.id() {
-        let _ = state.worker.send(WorkerCmd::Detect);
-    } else if event.id == state.menu.open_tui.id() {
-        tui_launch::open();
-    } else if event.id == state.menu.startup.id() {
-        toggle_startup(state);
-    } else if event.id == state.menu.quit.id() {
-        *control_flow = ControlFlow::Exit;
+    if let Some(menu) = state.fallback_menu.as_ref() {
+        if event.id == menu.quit.id() {
+            *control_flow = ControlFlow::Exit;
+        } else if event.id == menu.refresh.id() {
+            let _ = state.worker.send(WorkerCmd::Refresh);
+        }
+        return;
+    }
+    let Some(action) = OptionsAction::from_id(event.id.as_ref()) else {
+        return;
+    };
+    match action {
+        OptionsAction::Refresh => {
+            let _ = state.worker.send(WorkerCmd::Refresh);
+        }
+        OptionsAction::Detect => {
+            let _ = state.worker.send(WorkerCmd::Detect);
+        }
+        OptionsAction::OpenTui => tui_launch::open(),
+        OptionsAction::ToggleStartup => toggle_startup(state),
+        OptionsAction::Quit => *control_flow = ControlFlow::Exit,
+        OptionsAction::Customize
+        | OptionsAction::Settings
+        | OptionsAction::CheckUpdates
+        | OptionsAction::About => open_popover_action(state, action),
+    }
+}
+
+/// Build the emergency status-item menu and hand it to the tray (#249). The
+/// menu takes the clicks (`NSStatusItem` menu interception, the behavior
+/// `build_tray` normally avoids) — with no webview there is no popover for
+/// them to open instead.
+fn attach_fallback_menu(tray: &TrayIcon) -> FallbackMenu {
+    let [refresh, quit] = menu_bar::fallback_menu_items();
+    let refresh = MenuItem::with_id(refresh.id, refresh.label, true, None);
+    let quit = MenuItem::with_id(quit.id, quit.label, true, None);
+    let menu = Menu::new();
+    let _ = menu.append_items(&[&refresh, &quit]);
+    tray.set_menu(Some(Box::new(menu) as Box<dyn ContextMenu>));
+    tray.set_show_menu_on_left_click(true);
+    tray.set_show_menu_on_right_click(true);
+    FallbackMenu { refresh, quit }
+}
+
+fn persist_menu_bar_value(key: &str, value: toml_edit::Value) {
+    if let Some(path) = config_path() {
+        let _ = crate::config::set_tray_value(&path, key, Some(value));
+    }
+}
+
+/// Start a switch the popover asked for. Only a vendor and label the host
+/// itself reported are accepted, and never while one is already running.
+fn request_account_switch(state: &mut TrayState, value: &Value) {
+    let vendor = value.get("vendor").and_then(Value::as_str).unwrap_or("");
+    let label = value.get("label").and_then(Value::as_str).unwrap_or("");
+    let allowed = facts_snapshot(&state.facts).accounts.iter().any(|fact| {
+        fact.vendor == vendor
+            && !fact.switching
+            && fact.active.as_deref() != Some(label)
+            && fact.labels.iter().any(|known| known == label)
+    });
+    if !allowed {
+        return;
+    }
+    with_facts(&state.facts, |f| {
+        for fact in f.accounts.iter_mut().filter(|fact| fact.vendor == vendor) {
+            fact.target = label.to_string();
+            fact.switching = true;
+            fact.error.clear();
+        }
+    });
+    apply_facts(state);
+    let facts = state.facts.clone();
+    let proxy = state.proxy.clone();
+    let worker = state.worker.clone();
+    let failed_vendor = vendor.to_string();
+    let (vendor, label) = (vendor.to_string(), label.to_string());
+    let spawned = std::thread::Builder::new()
+        .name("ai-usagebar-tray-account-switch".into())
+        .spawn(move || {
+            run_account_switch(&facts, &vendor, &label);
+            let _ = proxy.send_event(UserEvent::Facts);
+            let _ = worker.send(WorkerCmd::Refresh);
+        });
+    if spawned.is_err() {
+        with_facts(&state.facts, |f| {
+            for fact in f
+                .accounts
+                .iter_mut()
+                .filter(|fact| fact.vendor == failed_vendor)
+            {
+                fact.switching = false;
+                fact.error = "could not start the account switch".into();
+            }
+        });
+        apply_facts(state);
     }
 }
 
@@ -615,6 +897,9 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
         "ready" => {
             state.js_ready = true;
             push_to_webview(state);
+            if let Some(screen) = state.pending_menu_action.take() {
+                run_menu_action(state, screen);
+            }
         }
         "detect" => {
             let _ = state.worker.send(WorkerCmd::Detect);
@@ -626,12 +911,9 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
         "close" => hide_popover(state),
         "quit" => *control_flow = ControlFlow::Exit,
         "toggle-startup" => toggle_startup(state),
+        "menu-labels" => state.menu_labels = state.menu_labels.merged(&value),
+        "switch-account" => request_account_switch(state, &value),
         "resize" => handle_resize(state, &value),
-        "refresh-entry" => {
-            if let Some(id) = value.get("id").and_then(Value::as_str) {
-                let _ = state.worker.send(WorkerCmd::RefreshEntry(id.to_owned()));
-            }
-        }
         "set-shortcut" => {
             let text = value.get("value").and_then(Value::as_str).unwrap_or("");
             set_shortcut(state, text);
@@ -641,11 +923,46 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
                 set_refresh(state, minutes);
             }
         }
+        "set-notifications-enabled" => {
+            if let Some(enabled) = value.get("value").and_then(Value::as_bool)
+                && let Some(path) = config_path()
+                && crate::config::set_notification_value(&path, "enabled", enabled.into()).is_ok()
+            {
+                state.notifications_enabled = enabled;
+                push_to_webview(state);
+            }
+        }
+        "set-notifications-threshold" => {
+            if let Some(threshold) = value.get("value").and_then(Value::as_u64)
+                && (1..=100).contains(&threshold)
+                && let Some(path) = config_path()
+                && crate::config::set_notification_value(
+                    &path,
+                    "threshold",
+                    (threshold as i64).into(),
+                )
+                .is_ok()
+            {
+                state.notifications_threshold = threshold as u8;
+                push_to_webview(state);
+            }
+        }
+        "set-menu-bar-chart" => {
+            if let Some(enabled) = value.get("value").and_then(Value::as_bool) {
+                state.menu_bar_chart = enabled;
+                persist_menu_bar_value(
+                    "menu_bar_style",
+                    (if enabled { "bars" } else { "provider" }).into(),
+                );
+                apply_strip_icon(state);
+                push_to_webview(state);
+            }
+        }
         "strip" => {
-            let (style, stars, order) = parse_strip_ipc(&value);
-            state.strip_style = style;
+            let (_, stars, order) = parse_strip_ipc(&value);
             state.stars = stars;
             state.strip_order = order;
+            state.strip_order_known = true;
             apply_strip_icon(state);
         }
         "open-url" => {
@@ -653,8 +970,18 @@ fn handle_ipc(state: &mut TrayState, body: &str, control_flow: &mut ControlFlow)
                 browse::open(url);
             }
         }
+        "set-updates" => {
+            let mode = value.get("mode").and_then(Value::as_str).unwrap_or("");
+            set_updates(state, mode);
+        }
         "check-update" => {
-            let _ = state.worker.send(WorkerCmd::CheckUpdate);
+            let _ = state.worker.send(WorkerCmd::CheckUpdate { manual: true });
+        }
+        "install-update" => {
+            let _ = state.worker.send(WorkerCmd::InstallUpdate);
+        }
+        "snooze-update" => {
+            let _ = state.worker.send(WorkerCmd::SnoozeUpdate);
         }
         _ => {}
     }
@@ -668,30 +995,53 @@ fn handle_resize(state: &mut TrayState, value: &Value) {
     {
         apply_theme(state, theme);
     }
-    let Some(requested) = value.get("height").and_then(Value::as_f64) else {
-        return;
-    };
-    if !requested.is_finite() || requested <= 0.0 {
-        return;
+    let mut resize = false;
+    if let Some(style) = value
+        .get("style")
+        .and_then(Value::as_str)
+        .and_then(PopoverStyle::parse)
+        && state.style != style
+    {
+        state.style = style;
+        resize = true;
+        if let Some(background) = &state.native_background {
+            background.setHidden(style != PopoverStyle::Native);
+        }
     }
-    let visible_h = anchor_visible_height(state.last_anchor);
-    let target = clamp_popover_height(requested, visible_h);
-    state.popover_height = target;
-    state
-        .window
-        .set_inner_size(LogicalSize::new(WINDOW_WIDTH, target));
-    if state.popover_open {
-        position_popover(state);
+    if let Some(requested) = value.get("height").and_then(Value::as_f64)
+        && requested.is_finite()
+        && requested > 0.0
+    {
+        let visible_h = anchor_visible_height(state.last_anchor);
+        state.popover_height = clamp_popover_height(requested, visible_h);
+        resize = true;
+    }
+    if resize {
+        state.window.set_inner_size(LogicalSize::new(
+            state.style.window_width(WINDOW_WIDTH),
+            state.popover_height,
+        ));
+        if state.popover_open {
+            position_popover(state);
+        }
     }
 }
 
 fn apply_theme(state: &mut TrayState, theme: Theme) {
-    if state.theme == theme {
-        return;
-    }
     state.theme = theme;
-    if let Some(webview) = state.webview.as_ref() {
-        let _ = webview.set_background_color(theme.background());
+    let ptr = state.window.ns_window() as *mut NSWindow;
+    if let Some(window) = unsafe { ptr.as_ref() } {
+        // SAFETY: AppKit exports these immutable appearance names for the
+        // lifetime of the process.
+        let name = unsafe {
+            match theme {
+                Theme::Light => NSAppearanceNameAqua,
+                Theme::Dark => NSAppearanceNameDarkAqua,
+            }
+        };
+        if let Some(appearance) = NSAppearance::appearanceNamed(name) {
+            window.setAppearance(Some(&appearance));
+        }
     }
 }
 
@@ -705,15 +1055,66 @@ fn anchor_visible_height(anchor: Option<(f64, f64)>) -> f64 {
 fn toggle_startup(state: &mut TrayState) {
     let next = !startup::is_enabled();
     if startup::set_enabled(next).is_ok() {
-        state.menu.startup.set_checked(next);
         if let Some(obj) = state.payload.as_object_mut() {
             obj.insert("startup_enabled".into(), Value::Bool(next));
         }
         if state.js_ready {
             push_to_webview(state);
         }
+    }
+}
+
+/// The Options entries under the cursor: the status item keeps no standing
+/// menu (see `build_tray`); the macOS backend installs this one only for the
+/// duration of `show_menu` — it performs the status-item click and removes it
+/// again — so left clicks keep reaching `handle_tray`.
+fn show_options_menu(state: &mut TrayState) {
+    let menu = Menu::new();
+    options_menu::fill_menu(
+        &menu,
+        &options_menu::options_entries(
+            &state.menu_labels,
+            state.style == PopoverStyle::Native,
+            startup::is_enabled(),
+        ),
+    );
+    state
+        .tray
+        .set_menu(Some(Box::new(menu) as Box<dyn ContextMenu>));
+    state.tray.show_menu();
+}
+
+/// The navigation itself: the popover installs `__AIUB_MENU_ACTION__` on load,
+/// so this only reaches the page once there is a webview to evaluate in.
+fn run_menu_action(state: &TrayState, screen: &str) {
+    if let Some(webview) = state.webview.as_ref() {
+        let _ = webview.evaluate_script(&format!(
+            "window.__AIUB_MENU_ACTION__ && window.__AIUB_MENU_ACTION__({})",
+            json!(screen)
+        ));
+    }
+}
+
+/// A right-click entry that opens the popover on a given screen: show it when
+/// closed, then hand the page the navigation (`__AIUB_MENU_ACTION__`, which
+/// the popover installs). Without a webview the fallback menu (#249) owns the
+/// status item, so the entry opens nothing rather than an empty window. Before
+/// the page reports `ready` the hook does not exist yet, so the choice is kept
+/// and runs on `ready`; a newer choice before `ready` replaces the older one.
+fn open_popover_action(state: &mut TrayState, action: OptionsAction) {
+    if state.webview.is_none() {
+        return;
+    }
+    let Some(screen) = action.popover_action() else {
+        return;
+    };
+    if !state.popover_open {
+        show_popover(state);
+    }
+    if state.js_ready {
+        run_menu_action(state, screen);
     } else {
-        state.menu.startup.set_checked(startup::is_enabled());
+        state.pending_menu_action = Some(screen);
     }
 }
 
@@ -756,6 +1157,9 @@ fn guard_blur(state: &mut TrayState) {
 fn hide_popover(state: &mut TrayState) {
     state.window.set_visible(false);
     state.popover_open = false;
+    // Closing lands the next open on the dashboard, so a screen choice still
+    // waiting for `ready` is dropped too.
+    state.pending_menu_action = None;
     if let Some(webview) = state.webview.as_ref() {
         let _ =
             webview.evaluate_script("window.__AIUB_VISIBLE__ && window.__AIUB_VISIBLE__(false)");
@@ -792,52 +1196,28 @@ fn position_popover(state: &TrayState) {
         visible,
         below_y,
         icon_x,
-        popover_w: WINDOW_WIDTH,
+        popover_w: state.style.window_width(WINDOW_WIDTH),
         popover_h: height,
     });
     apply_cocoa_frame(&state.window, frame);
 }
 
-fn build_menu(startup_enabled: bool) -> MenuItems {
-    MenuItems {
-        refresh: MenuItem::with_id("refresh", "Refresh", true, None),
-        detect: MenuItem::with_id("detect", "Detect Providers", true, None),
-        open_tui: MenuItem::with_id("open-tui", "Open TUI", true, None),
-        startup: CheckMenuItem::with_id("startup", "Start at Login", true, startup_enabled, None),
-        quit: MenuItem::with_id("quit", "Quit", true, None),
-    }
-}
-
-fn make_menu(items: &MenuItems) -> Menu {
-    let menu = Menu::new();
-    let sep = PredefinedMenuItem::separator();
-    let _ = menu.append_items(&[
-        &items.refresh,
-        &items.detect,
-        &items.open_tui,
-        &sep,
-        &items.startup,
-        &items.quit,
-    ]);
-    menu
-}
-
-fn build_tray(menu: Menu) -> Result<TrayIcon, String> {
+fn build_tray() -> Result<TrayIcon, String> {
     let icon = static_icon().map_err(|error| error.to_string())?;
+    // NSStatusItem.setMenu intercepts clicks even when the tray-icon menu-on-
+    // click flags are false. Keep the status item menu-free: the left click
+    // opens the WKWebView panel, and the right click shows the Options menu
+    // only while `TrayIcon::show_menu` runs.
     TrayIconBuilder::new()
         .with_icon(icon)
         .with_icon_as_template(true)
-        .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
+        .with_menu_on_right_click(false)
         .build()
         .map_err(|error| error.to_string())
 }
 
-fn build_webview(
-    window: &Window,
-    proxy: EventLoopProxy<UserEvent>,
-    theme: Theme,
-) -> Result<WebView, String> {
+fn build_webview(window: &Window, proxy: EventLoopProxy<UserEvent>) -> Result<WebView, String> {
     // Stable WKWebsiteDataStore so Customize layout / stars survive restarts
     // (wry has no data_directory on macOS; this is the Darwin stand-in).
     const STORE: [u8; 16] = [
@@ -856,7 +1236,7 @@ fn build_webview(
             let _ = proxy.send_event(UserEvent::Ipc(body));
         })
         .with_transparent(true)
-        .with_background_color(theme.background())
+        .with_background_color((0, 0, 0, 0))
         .with_accept_first_mouse(true)
         .with_data_store_identifier(STORE)
         .build(window)
@@ -881,13 +1261,6 @@ fn protocol_response(request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> 
         .header("Access-Control-Allow-Origin", "*")
         .body(Cow::Borrowed(body))
         .unwrap_or_else(|_| Response::new(Cow::Borrowed(body)))
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 fn cocoa_mouse() -> (f64, f64) {
@@ -968,6 +1341,41 @@ fn round_corners(window: &Window) {
     }
 }
 
+/// Create the hidden AppKit material view behind WKWebView. On systems with
+/// Liquid Glass, use NSGlassEffectView; older macOS versions use the semantic
+/// popover material.
+fn install_native_background(window: &Window) -> Option<Retained<NSView>> {
+    let ptr = window.ns_window() as *mut NSWindow;
+    let mtm = MainThreadMarker::new()?;
+    // SAFETY: tao returns the live NSWindow owned by this Window.
+    let ns_window = unsafe { ptr.as_ref() }?;
+    let content = ns_window.contentView()?;
+    let sizing =
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable;
+
+    if AnyClass::get(c"NSGlassEffectView").is_some() {
+        let effect_view = NSGlassEffectView::new(mtm);
+        effect_view.setStyle(NSGlassEffectViewStyle::Regular);
+        effect_view.setFrame(content.bounds());
+        effect_view.setAutoresizingMask(sizing);
+        effect_view.setHidden(true);
+        round_view(&effect_view);
+        content.addSubview_positioned_relativeTo(&effect_view, NSWindowOrderingMode::Below, None);
+        Some(effect_view.into_super())
+    } else {
+        let material = NSVisualEffectView::new(mtm);
+        material.setMaterial(NSVisualEffectMaterial::Popover);
+        material.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        material.setState(NSVisualEffectState::Active);
+        material.setFrame(content.bounds());
+        material.setAutoresizingMask(sizing);
+        material.setHidden(true);
+        round_view(&material);
+        content.addSubview_positioned_relativeTo(&material, NSWindowOrderingMode::Below, None);
+        Some(material.into_super())
+    }
+}
+
 fn round_view(view: &NSView) {
     view.setWantsLayer(true);
     let Some(layer) = view.layer() else {
@@ -1028,6 +1436,205 @@ fn apply_contents_scale(view: &NSView, scale: f64) {
         layer.setNeedsDisplay();
     }
     view.setNeedsDisplay(true);
+}
+
+/// Logical height of the combined provider-logo strip.
+const LOGO_STRIP_HEIGHT: f64 = 18.0;
+/// Provider marks occupy a square that preserves their original aspect ratio.
+const LOGO_MARK_BOX: f64 = 16.0;
+/// A single value uses the larger menu-bar text size.
+const LOGO_SINGLE_VALUE_FONT_SIZE: f64 = 12.0;
+/// Two values use a compact, tightly stacked text size.
+const LOGO_STACKED_VALUE_FONT_SIZE: f64 = 9.0;
+/// Two 9 pt values overlap by 2 pt, matching OpenUsage's tight stack.
+const LOGO_STACKED_LINE_STEP: f64 = 7.0;
+
+/// Build one AppKit template image for provider marks and their starred values.
+fn logo_strip_image(segments: &[LogoSegment]) -> Retained<NSImage> {
+    debug_assert!(!segments.is_empty());
+    // SAFETY: AppKit exposes this immutable font-weight constant for the life of the process.
+    let semibold = unsafe { NSFontWeightSemibold };
+    let label_font = NSFont::systemFontOfSize_weight(LOGO_SINGLE_VALUE_FONT_SIZE, semibold);
+    let single_value_font =
+        NSFont::monospacedDigitSystemFontOfSize_weight(LOGO_SINGLE_VALUE_FONT_SIZE, semibold);
+    let stacked_value_font =
+        NSFont::monospacedDigitSystemFontOfSize_weight(LOGO_STACKED_VALUE_FONT_SIZE, semibold);
+    let label_attributes = font_attributes(&label_font);
+    let single_value_attributes = font_attributes(&single_value_font);
+    let stacked_value_attributes = font_attributes(&stacked_value_font);
+
+    let items: Vec<LogoStripItem> = segments
+        .iter()
+        .map(|segment| {
+            let mark = marks::mark_svg(&segment.slug).and_then(svg_image);
+            let fallback_name = NSString::from_str(segment.short_name.as_deref().unwrap_or(""));
+            let label_width = if mark.is_some() {
+                LOGO_MARK_BOX
+            } else {
+                text_width(&fallback_name, &label_attributes)
+            };
+            let values: Vec<Retained<NSString>> = segment
+                .values
+                .iter()
+                .take(2)
+                .map(|value| NSString::from_str(value))
+                .collect();
+            let line_count = values.len();
+            let value_attributes = if line_count > 1 {
+                &stacked_value_attributes
+            } else {
+                &single_value_attributes
+            };
+            let value_width = values
+                .iter()
+                .map(|value| text_width(value, value_attributes))
+                .fold(0.0_f64, f64::max);
+            LogoStripItem {
+                mark,
+                fallback_name,
+                values,
+                label_width,
+                value_width,
+                line_count,
+            }
+        })
+        .collect();
+
+    let item_gap = 11.0;
+    let width = items
+        .iter()
+        .map(|item| {
+            item.label_width
+                + if item.label_width > 0.0 {
+                    4.0 + item.value_width
+                } else {
+                    item.value_width
+                }
+        })
+        .sum::<f64>()
+        + item_gap * items.len().saturating_sub(1) as f64;
+    let block = RcBlock::new(move |dst: NSRect| {
+        let mut x = dst.origin.x;
+        let fallback_y = dst.origin.y + (LOGO_STRIP_HEIGHT - LOGO_SINGLE_VALUE_FONT_SIZE) / 2.0;
+        for (index, item) in items.iter().enumerate() {
+            if let Some(mark) = &item.mark {
+                draw_fitted_mark(
+                    mark,
+                    x,
+                    dst.origin.y + (LOGO_STRIP_HEIGHT - LOGO_MARK_BOX) / 2.0,
+                );
+            } else {
+                draw_status_text(&item.fallback_name, x, fallback_y, &label_attributes);
+            }
+            x += item.label_width;
+            if item.label_width > 0.0 {
+                x += 4.0;
+            }
+            let stacked = item.line_count > 1;
+            let value_attributes = if stacked {
+                &stacked_value_attributes
+            } else {
+                &single_value_attributes
+            };
+            let font_size = if stacked {
+                LOGO_STACKED_VALUE_FONT_SIZE
+            } else {
+                LOGO_SINGLE_VALUE_FONT_SIZE
+            };
+            let line_step = if stacked {
+                LOGO_STACKED_LINE_STEP
+            } else {
+                font_size
+            };
+            let text_height = font_size + line_step * item.line_count.saturating_sub(1) as f64;
+            let text_y = dst.origin.y + (LOGO_STRIP_HEIGHT - text_height) / 2.0;
+            for (line, value) in item.values.iter().enumerate() {
+                draw_status_text(value, x, text_y + line as f64 * line_step, value_attributes);
+            }
+            x += item.value_width;
+            if index + 1 < items.len() {
+                x += item_gap;
+            }
+        }
+        Bool::from(true)
+    });
+    let image = NSImage::imageWithSize_flipped_drawingHandler(
+        NSSize::new(width.max(1.0), LOGO_STRIP_HEIGHT),
+        true,
+        &block,
+    );
+    image.setTemplate(true);
+    image
+}
+
+/// Decode one embedded SVG, returning `None` when AppKit cannot load it.
+fn svg_image(svg: &'static [u8]) -> Option<Retained<NSImage>> {
+    let data = NSData::with_bytes(svg);
+    let image = NSImage::initWithData(NSImage::alloc(), &data)?;
+    let size = image.size();
+    if !size.width.is_finite()
+        || !size.height.is_finite()
+        || size.width <= 0.0
+        || size.height <= 0.0
+    {
+        return None;
+    }
+    Some(image)
+}
+
+/// Build the correctly typed AppKit font attribute dictionary.
+fn font_attributes(font: &NSFont) -> Retained<NSDictionary<NSAttributedStringKey, AnyObject>> {
+    let font_object: &AnyObject = font.as_ref();
+    let black = NSColor::colorWithWhite_alpha(0.0, 1.0);
+    let color_object: &AnyObject = black.as_ref();
+    // SAFETY: AppKit exports both attribute keys as process-lifetime NSString constants.
+    let (font_key, foreground_key) =
+        unsafe { (NSFontAttributeName, NSForegroundColorAttributeName) };
+    NSDictionary::from_slices(&[font_key, foreground_key], &[font_object, color_object])
+}
+
+/// Measure text using the same font attributes that draw it.
+fn text_width(text: &NSString, attributes: &NSDictionary<NSAttributedStringKey, AnyObject>) -> f64 {
+    // SAFETY: `attributes` has the NSFontAttributeName key and NSFont value
+    // built by `font_attributes` immediately before measuring and drawing.
+    unsafe { text.sizeWithAttributes(Some(attributes)).width.ceil() }
+}
+
+/// Draw text with the same font attributes used to calculate its width.
+fn draw_status_text(
+    text: &NSString,
+    x: f64,
+    y: f64,
+    attributes: &NSDictionary<NSAttributedStringKey, AnyObject>,
+) {
+    // SAFETY: `attributes` has the NSFontAttributeName key and NSFont value
+    // built by `font_attributes`; the drawing point is within the image strip.
+    unsafe { text.drawAtPoint_withAttributes(NSPoint::new(x, y), Some(attributes)) };
+}
+
+/// Draw an SVG mark into the 16-point box without distorting its aspect ratio.
+fn draw_fitted_mark(image: &NSImage, x: f64, y: f64) {
+    let source_size = image.size();
+    let scale = (LOGO_MARK_BOX / source_size.width).min(LOGO_MARK_BOX / source_size.height);
+    let width = source_size.width * scale;
+    let height = source_size.height * scale;
+    let source = NSRect {
+        origin: NSPoint::new(0.0, 0.0),
+        size: source_size,
+    };
+    let destination = NSRect {
+        origin: NSPoint::new(
+            x + (LOGO_MARK_BOX - width) / 2.0,
+            y + (LOGO_MARK_BOX - height) / 2.0,
+        ),
+        size: NSSize::new(width, height),
+    };
+    image.drawInRect_fromRect_operation_fraction(
+        destination,
+        source,
+        NSCompositingOperation::SourceOver,
+        1.0,
+    );
 }
 
 fn template_bars_image(fractions: &[f64]) -> Option<Retained<NSImage>> {
@@ -1106,7 +1713,7 @@ fn fill_round_rect(x: f64, y: f64, w: f64, h: f64, radius: f64, alpha: f64) {
     NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius).fill();
 }
 
-fn set_status_button_image(image: &NSImage) {
+fn set_status_button_image(image: Option<&NSImage>) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -1114,7 +1721,7 @@ fn set_status_button_image(image: &NSImage) {
         return;
     };
     button.setImageScaling(NSImageScaling::ScaleNone);
-    button.setImage(Some(image));
+    button.setImage(image);
 }
 
 fn find_status_bar_button(mtm: MainThreadMarker) -> Option<Retained<NSButton>> {
@@ -1148,6 +1755,21 @@ struct SingleInstance {
 }
 
 impl SingleInstance {
+    /// A relaunch after an update races the old process's exit; keep
+    /// retrying for a bounded time instead of silently quitting.
+    fn acquire_waiting(wait: bool) -> Option<Self> {
+        let deadline = Instant::now() + RELAUNCH_WAIT;
+        loop {
+            if let Some(instance) = Self::acquire() {
+                return Some(instance);
+            }
+            if !wait || Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
     fn acquire() -> Option<Self> {
         let dir = crate::cache::xdg_cache_dir().ok()?.join("ai-usagebar");
         std::fs::create_dir_all(&dir).ok()?;

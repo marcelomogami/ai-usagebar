@@ -9,6 +9,7 @@ import {
 import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { useRef, useState } from "react";
 import { DragHandle } from "@/components/DragHandle";
+import { TruncatedText } from "@/components/TruncatedText";
 import {
   handleRowDragEnd,
   handleRowDragOver,
@@ -23,6 +24,8 @@ import MdiStar from "~icons/mdi/star";
 import MdiStarOutline from "~icons/mdi/star-outline";
 import { Switch } from "@/components/ui/switch";
 import type { Card, Layout, Row } from "@/lib/types";
+import { m } from "@/paraglide/messages.js";
+import { useI18n } from "@/lib/i18n";
 import { isStarred, prefsForCard, rowKey } from "../model.js";
 
 interface ProviderDetailProps {
@@ -39,6 +42,7 @@ interface ProviderDetailProps {
  * a card or across the divider; an empty card shows the dashed "Drag metrics here" target.
  */
 export function ProviderDetail({ card, layout, starError, onReorderRows, onToggleRow, onToggleStar }: ProviderDetailProps) {
+  const { metricLabel } = useI18n();
   const sensors = useTraySensors();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState<RowLists | null>(null);
@@ -93,7 +97,7 @@ export function ProviderDetail({ card, layout, starError, onReorderRows, onToggl
           keys={lists.always}
           layout={layout}
           prefs={prefs}
-          title="Always Visible"
+          title={m.always_visible()}
           onToggleRow={onToggleRow}
           onToggleStar={onToggleStar}
         />
@@ -104,12 +108,12 @@ export function ProviderDetail({ card, layout, starError, onReorderRows, onToggl
           keys={lists.demand}
           layout={layout}
           prefs={prefs}
-          title="On Demand"
+          title={m.on_demand()}
           onToggleRow={onToggleRow}
           onToggleStar={onToggleStar}
         />
         {starError ? (
-          <div className="px-1 text-[length:var(--sz-badge)] text-meter-red">{starError}</div>
+          <div className="px-[var(--space-xs)] text-[length:var(--sz-badge)] text-meter-red">{metricLabel(starError)}</div>
         ) : null}
       </div>
       <DragOverlay dropAnimation={null}>
@@ -150,7 +154,7 @@ function MetricSection({
     <div className="flex flex-col gap-[var(--header-card-gap)]">
       <div className="section-title">{title}</div>
       <SortableColumn id={id} items={keys} className="card-surface">
-        {keys.length === 0 ? <div className="drop-zone">Drag metrics here</div> : null}
+        {keys.length === 0 ? <div className="drop-zone">{m.drag_metrics_here()}</div> : null}
         {keys.map((key) => {
           const row = byKey.get(key);
           if (!row) return null;
@@ -185,23 +189,24 @@ interface MetricTuneRowProps {
 
 /** CustomizeMetricRow: grip, metric title, star, on/off switch. */
 function MetricTuneRow({ enabled, handle, row, starred, onStar, onToggle }: MetricTuneRowProps) {
-  const title = String(row.label || row.kind);
+  const { metricLabel } = useI18n();
+  const title = metricLabel(String(row.label || row.kind));
   return (
-    <div data-row-key={rowKey(row)} className="flex items-center gap-[10px] px-[var(--pad-control)] py-[var(--pad-control)]">
+    <div data-row-key={rowKey(row)} className="flex items-center gap-[var(--row-gap)] px-[var(--card-pad)] py-[var(--pad-control)]">
       <DragHandle attributes={handle?.attributes} listeners={handle?.listeners} />
-      <span className="min-w-0 flex-1 truncate">{title}</span>
+      <TruncatedText className="min-w-0 flex-1">{title}</TruncatedText>
       {onStar ? (
         <button
           type="button"
-          aria-label={starred ? `Unstar ${title}` : `Star ${title} for menu bar`}
+          aria-label={starred ? `${m.unstar()} ${title}` : `${m.star()} ${title} ${m.for_menu_bar()}`}
           aria-pressed={starred === true}
-          className="inline-flex size-[18px] items-center justify-center text-label-2 hover:text-foreground"
+          className="hover-icon inline-flex size-[var(--row-icon-box)] items-center justify-center text-label-2 hover:text-foreground"
           onClick={onStar}
         >
-          {starred ? <MdiStar className="size-[14px] text-primary" /> : <MdiStarOutline className="size-[14px]" />}
+          {starred ? <MdiStar className="size-[var(--icon-row)] text-primary" /> : <MdiStarOutline className="size-[var(--icon-row)]" />}
         </button>
       ) : null}
-      <Switch checked={enabled} aria-label={`Show ${title}`} onCheckedChange={(on) => onToggle?.(on === true)} />
+      <Switch checked={enabled} aria-label={`${m.show()} ${title}`} onCheckedChange={(on) => onToggle?.(on === true)} />
     </div>
   );
 }

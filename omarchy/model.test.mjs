@@ -34,6 +34,12 @@ const barWindowSchema = manifest.barWidget.schema.find(row => row.key === 'barWi
 assert.equal(barWindowSchema.type, 'enum');
 assert.deepEqual(barWindowSchema.options, ['auto', 'session', 'weekly', 'monthly']);
 assert.equal(barWindowSchema.defaultValue, 'auto');
+for (const key of ['showCursorModels', 'showCursorOther', 'showCursorOnDemand']) {
+  assert.equal(manifest.barWidget.defaults[key], true);
+  const row = manifest.barWidget.schema.find(item => item.key === key);
+  assert.equal(row.type, 'boolean');
+  assert.equal(row.defaultValue, true);
+}
 // The normalizer must accept every option the manifest offers, or the
 // dropdown would write a value the panel silently ignores.
 for (const option of barWindowSchema.options)
@@ -47,6 +53,25 @@ assert.match(barWidgetSource, /source:\s*Qt\.resolvedUrl\("Panel\.qml"\)/);
 assert.match(barWidgetSource, /target\.anchorItem\s*=\s*button/);
 assert.match(barWidgetSource, /target\.hostWidget\s*=\s*root/);
 assert.match(barWidgetSource, /buttonCode\s*===\s*Qt\.RightButton\)\s*root\.launchDashboard\(\)/);
+// The bar presses a slot's widget with no coordinates, so each chip registers
+// as its own click target and the bar picks the one under the pointer; a lone
+// chip leaves the button as the only target and its press toggles as before.
+assert.match(barWidgetSource, /function\s+chipItems\s*\(/);
+assert.match(barWidgetSource, /function\s+syncChipTargets\s*\(/);
+assert.match(barWidgetSource, /onModelChanged:\s*Qt\.callLater\(root\.syncChipTargets\)/);
+assert.match(barWidgetSource, /if\s*\(chips\.length\s*<=\s*1\)\s*return/);
+// The registered target is the chip's whole column of the slot: the bar
+// hit-tests it by rect, so the glyph-height delegate alone left the padding
+// above and below it to the button as well as the gaps beside it.
+assert.match(barWidgetSource, /Model\.chipHitGaps\(index,\s*chipRepeater\.count,\s*Style\.space\(10\),\s*Style\.spaceReal\(17\)\s*\/\s*2\)/);
+// The button's edge padding lives in the outer columns, so it must not be
+// added to the widget's width a second time.
+assert.match(barWidgetSource, /fixedWidth:\s*root\.bar\s*&&\s*root\.bar\.vertical\s*\?\s*-1\s*:\s*chipRow\.implicitWidth\n/);
+assert.match(barWidgetSource, /height:\s*button\.height/);
+assert.match(barWidgetSource, /width:\s*chipContent\.implicitWidth\s*\+\s*hitGaps\.left\s*\+\s*hitGaps\.right/);
+assert.match(barWidgetSource, /x:\s*chipHit\.hitGaps\.left/);
+assert.match(barWidgetSource, /function\s+triggerPress\s*\(buttonCode\)/);
+assert.match(barWidgetSource, /root\.panelItem\.openEntry\(modelData\.id\s*\|\|\s*""\)/);
 assert.doesNotMatch(barWidgetSource, /\bIpcHandler\s*\{/);
 
 const panelSource = fs.readFileSync(new URL('./Panel.qml', import.meta.url), 'utf8');
@@ -55,18 +80,26 @@ assert.match(panelSource, /property\s+var\s+anchorItem:\s*null/);
 assert.match(panelSource, /property\s+var\s+hostWidget:\s*null/);
 assert.match(panelSource, /SettingsView\s*\{/);
 assert.match(panelSource, /function\s+openSettings\s*\(/);
+assert.match(panelSource, /function\s+openEntry\s*\(/);
+assert.match(panelSource, /id:\s*chip\.id/);
 assert.match(panelSource, /setting\("lastSelectedEntryId",\s*""\)/);
 assert.match(panelSource, /setting\("showValue",\s*true\)/);
 assert.match(panelSource, /setting\("showProvider",\s*false\)/);
 assert.match(panelSource, /setting\("showAll",\s*false\)/);
 assert.match(panelSource, /Model\.normalizeBarWindow\(setting\("barWindow",\s*"auto"\)\)/);
 // The pin covers the bar value and its echoes (hero detail, tooltip):
-// summary (bar label/chips) is pinned, while panel rows and alert state
-// keep the auto headline.
+// summary (bar label/chips) is pinned, while panel rows keep every pool.
+// Cursor's bar urgent state follows the pools still on the chip.
 assert.match(panelSource, /Model\.headline\(entry,\s*barWindow\)/);
 assert.match(panelSource, /Model\.headline\(item,\s*barWindow\)/);
-assert.match(panelSource, /Model\.isAlarming\(entry\)/);
-assert.match(panelSource, /Model\.anyAlarming\(visibleEntries\)/);
+assert.match(panelSource, /Model\.isAlarming\(item\)/);
+// A failed or cached refresh alone cannot activate the bar, but a report that
+// never arrived has nothing else to show there.
+assert.match(panelSource, /readonly property bool reportMissing:\s*loadError\s*!==\s*""\s*&&\s*entries\.length\s*===\s*0/);
+assert.match(panelSource, /\(showAll\s*\?\s*shownAnyAlarming\(\)\s*:\s*entryAlarming\)[\s\S]{0,40}reportMissing/);
+assert.doesNotMatch(panelSource, /chipAlarm\s*=\s*rows\[i\]\.status\s*===\s*"error"/);
+assert.match(panelSource, /function shownAnyAlarming\(\)/);
+assert.doesNotMatch(panelSource, /Model\.anyAlarming\(visibleEntries\)/);
 assert.doesNotMatch(panelSource, /autoSummary/);
 assert.match(panelSource, /function\s+setBarWindow\s*\(/);
 assert.match(panelSource, /onBarWindowRequested/);
@@ -92,6 +125,11 @@ assert.match(panelSource, /providerList\.forceLayout\(\)/);
 // rendered with three borders. (#231)
 assert.match(panelSource, /Column\s*\{[\s\S]*?id:\s*column[\s\S]*?x:\s*Style\.spacing\.hairline/);
 assert.match(panelSource, /width:\s*panelFlick\.width\s*-\s*Style\.spacing\.hairline\s*\*\s*2/);
+// Long settings forms must remain reachable with mouse wheels and touchpads.
+assert.match(panelSource, /WheelHandler\s*\{[\s\S]*?acceptedDevices:\s*PointerDevice\.Mouse\s*\|\s*PointerDevice\.TouchPad/);
+const touchpadScale = /event\.pixelDelta\.y\s*\*\s*(\d+(?:\.\d+)?)/.exec(panelSource);
+assert.equal(Number(touchpadScale?.[1]), 5, 'touchpad scroll covers five times the raw pixel delta');
+assert.match(panelSource, /event\.angleDelta\.y\s*\/\s*120\s*\*\s*Style\.space\(/);
 // The persisted choice is the source of truth on every entries change: when
 // a refresh gap briefly dropped the chosen entry, syncSelection's fallback
 // re-resolved to the primary and that transient selection stuck after the
@@ -119,6 +157,12 @@ assert.match(panelSource, /Model\.settingsWithOverrides\(root\.settings,\s*root\
 assert.match(panelSource, /bar\.shell\.updateEntryInline\(root\.moduleName,\s*entry\)/);
 assert.match(panelSource, /persistSelection\(selectedEntryId\)/);
 assert.match(panelSource, /Model\.barLabel\(/);
+// Cursor pool switches filter the bar chip and tooltip. The open panel keeps
+// every pool, including the hero numbers.
+assert.match(panelSource, /entrySections:\s*entry\s*\?\s*Model\.groupedSections\(entry\.sections\)/);
+assert.doesNotMatch(panelSource, /filterCursorSections/);
+assert.match(panelSource, /cursorDualHeadline\(item,\s*cursorPoolFlags\(\)\)/);
+assert.match(panelSource, /function panelHeadline\(item\) \{[\s\S]*?cursorDualHeadline\(item\)(?!\s*,)/);
 
 const settingsViewSource = fs.readFileSync(new URL('./SettingsView.qml', import.meta.url), 'utf8');
 assert.match(settingsViewSource, /command:\s*\["ai-usagebar",\s*"settings",\s*"show"\]/);
@@ -148,6 +192,16 @@ assert.match(settingsViewSource, /Log in with Nous Research/);
 assert.match(settingsViewSource, /Log in with GitHub Copilot/);
 assert.match(settingsViewSource, /choose GitHub Copilot as primary and save/);
 assert.match(settingsViewSource, /model:\s*root\.snapshot\.keys/);
+// Provider on/off switches (#244): the section lists the snapshot's vendors
+// and routes every change through the same stdin patch as the keys.
+assert.match(settingsViewSource, /text:\s*"PROVIDERS"/);
+assert.match(settingsViewSource, /model:\s*root\.snapshot\.vendors/);
+assert.match(settingsViewSource, /function\s+collectVendorToggles\s*\(/);
+assert.match(settingsViewSource, /function\s+setVendorOverride\s*\(/);
+assert.match(
+  settingsViewSource,
+  /Model\.buildSettingsPatch\(selectedPrimary,\s*collectChanges\(\),\s*collectVendorToggles\(\)\)/
+);
 assert.match(settingsViewSource, /Paste\s*"\s*\+\s*\(keyCard\.modelData\.secret_label/);
 assert.match(panelSource, /function\s+openNousLogin\s*\(/);
 assert.match(panelSource, /ai-usagebar auth nous login/);
@@ -341,6 +395,39 @@ assert.equal(strip[1].label, '95%');
 const one = model.barChips([claudeChip, openaiChip], openaiChip, false, true, false, false, false, false);
 assert.equal(one.length, 1);
 assert.equal(one[0].brand, 'openai.svg');
+// Every chip names the entry behind it, in the order the bar draws them; the
+// placeholders for a lone, vertical or empty bar have none to offer.
+assert.equal(strip.map(chip => chip.id).join(','), 'anthropic@work,openai');
+assert.equal(one[0].id, 'openai');
+// The bar resolves a slot press against each registered target's own rect, so a
+// chip's target is its whole column of the slot: the padding above and below
+// the glyph, and half of every gap beside it. Before this, a press on that
+// padding fell through to the button and toggled the entry already selected.
+// The pair is copied out of the vm realm, whose objects fail a strict compare.
+// The outer columns also own the button's edge padding: before, the first and
+// last chips stopped at their glyph and a press at either end of the widget
+// reached the button.
+const chipGaps = (index, count) => {
+  const value = model.chipHitGaps(index, count, 10, 8.5);
+  return {left: value.left, right: value.right};
+};
+assert.deepEqual(chipGaps(0, 3), {left: 8.5, right: 5});
+assert.deepEqual(chipGaps(1, 3), {left: 5, right: 5});
+assert.deepEqual(chipGaps(2, 3), {left: 5, right: 8.5});
+assert.deepEqual(chipGaps(0, 2), {left: 8.5, right: 5});
+assert.deepEqual(chipGaps(1, 2), {left: 5, right: 8.5});
+// A lone chip is not a target, but it still carries the edge padding the
+// button's width no longer adds.
+assert.deepEqual(chipGaps(0, 1), {left: 8.5, right: 8.5});
+// Two half-gaps replace each plain spacing and the edges move inside the outer
+// columns, so the columns add up to the widget's old padded width.
+assert.equal([0, 1, 2].map(index => {
+  const gaps = chipGaps(index, 3);
+  return 40 + gaps.left + gaps.right;
+}).reduce((sum, width) => sum + width, 0), 3 * 40 + 2 * 10 + 17);
+assert.equal(40 + chipGaps(0, 1).left + chipGaps(0, 1).right, 40 + 17);
+assert.equal(model.barChips([], null, false, true, false, false, true, false)[0].id, undefined);
+assert.equal(model.barChips([], null, false, true, false, false, true, true)[0].id, undefined);
 assert.equal(model.barStrip([claudeChip, openaiChip], false, false, true, false, false), '󰚩  29%  󱢆  95%');
 
 // The codes come from Rust's VendorId::short_name via the report; the vendor
@@ -356,8 +443,12 @@ assert.equal(model.providerShort({id: 'x', short_name: '<b>x</b>'}), '‹b›x�
 
 assert.equal(model.headline(parsed.entries[0]).text, '29%');
 assert.equal(model.headline(parsed.entries[1]).severity, 'critical');
-assert.equal(model.isAlarming(parsed.entries[0]), true); // stale
-assert.equal(model.isAlarming(parsed.entries[1]), true); // critical
+assert.equal(model.isAlarming(parsed.entries[0]), false); // cached, below critical
+assert.equal(model.barChips(parsed.entries, parsed.entries[0], false, true, false, false, false, false)[0].alarming, false);
+const failed = model.parseReport(JSON.stringify({entries: [{id: 'openai', status: 'error', error: 'Unavailable', sections: []}]})).entries[0];
+assert.equal(model.isAlarming(failed), false);
+assert.equal(model.barChips([failed], failed, false, true, false, false, false, false)[0].alarming, false);
+assert.equal(model.isAlarming(parsed.entries[1]), true); // critical usage still alerts
 // Reset-row fixtures are built from *local* calendar components, not UTC
 // strings, so every expectation below is a literal that holds in any
 // timezone the panel might run in. Deriving the expected clock from the same
@@ -425,6 +516,37 @@ assert.deepEqual(JSON.parse(JSON.stringify(model.groupedSections([{type: 'spacer
   [{type: 'spacer'}]);
 assert.equal(model.groupedSections(null).length, 0);
 assert.equal(model.groupedSections('not-sections').length, 0);
+
+// #255: the Claude entry's CLI-session rows arrive the same way — grouped
+// metrics — so the panel draws them under one "Sessions" heading beneath the
+// quota meters, with the health severity the report assigned.
+const claudeSections = model.parseReport(JSON.stringify({entries: [{
+  id: 'anthropic', error: null,
+  sections: [
+    {type: 'metric', label: 'Session (5h)', percent: 29, value: '29%', detail: '',
+     severity: 'low', reset_at: '2026-09-25T14:20:00Z', window_secs: 18000},
+    {type: 'metric', label: 'ship the release', percent: 90, value: '90%',
+     detail: '180,000 / 200,000 tokens · claude-test · last active 12:34:56',
+     severity: 'critical', group: 'Sessions'},
+    {type: 'metric', label: 'sketch ideas', percent: 0, value: 'compacted',
+     detail: 'compacted · waiting for the next response', severity: 'low', group: 'Sessions'},
+    {type: 'text', label: '', value: '… and 4 more sessions'}
+  ]
+}]})).entries[0].sections;
+assert.deepEqual(Array.from(model.groupedSections(claudeSections)).map(row => {
+  if (row.type === 'text' && row.value === '') return 'heading:' + row.label;
+  return row.type + ':' + row.label;
+}), [
+  'metric:Session (5h)',
+  'heading:Sessions',
+  'metric:ship the release',
+  'metric:sketch ideas',
+  'text:'                       // the overflow note is not a heading
+]);
+const sessionRow = model.groupedSections(claudeSections).find(row =>
+  row.type === 'metric' && row.group === 'Sessions');
+assert.equal(sessionRow.severity, 'critical');
+assert.equal(sessionRow.value, '90%');
 
 const balance = model.parseReport(JSON.stringify({entries: [{
   id: 'deepseek', error: null,
@@ -565,6 +687,59 @@ assert.equal(model.buildSettingsPatch('openai', [{id: 'kimi', action: 'bogus'}])
 assert.equal(model.parseSettingsApplyResult('{"ok":true}'), true);
 assert.equal(model.parseSettingsApplyResult('{"ok":false}'), false);
 
+// Provider on/off switches (#244): the snapshot carries every provider's
+// enabled state, an older binary's vendor-less snapshot still parses, and the
+// patch gains `vendors` only when a toggle is pending.
+const vendorsRaw = JSON.stringify({
+  schema_version: 1, primary: 'anthropic',
+  primary_choices: [{id: 'anthropic', label: 'Claude'}],
+  keys: [],
+  vendors: [
+    {id: 'anthropic', label: 'Claude', enabled: true},
+    {id: 'grok', label: 'Grok', enabled: false},
+    {id: 'opencode-go', label: 'OpenCode Go', enabled: true},
+    {id: '__proto__', label: 'never', enabled: true},
+    {id: 'kimi', label: 'Kimi', enabled: 'yes'}
+  ]
+});
+const vendorSnapshot = model.parseSettingsSnapshot(vendorsRaw);
+assert.equal(vendorSnapshot.ok, true);
+assert.equal(vendorSnapshot.vendors.length, 4);
+assert.equal(vendorSnapshot.vendors[0].id, 'anthropic');
+assert.equal(vendorSnapshot.vendors[0].enabled, true);
+assert.equal(vendorSnapshot.vendors[1].id, 'grok');
+assert.equal(vendorSnapshot.vendors[1].enabled, false);
+assert.equal(vendorSnapshot.vendors[2].label, 'OpenCode Go');
+// A non-boolean enabled is treated as off, never coerced from a string.
+assert.equal(vendorSnapshot.vendors[3].enabled, false);
+const noVendors = model.parseSettingsSnapshot(JSON.stringify({
+  schema_version: 1, primary: 'anthropic',
+  primary_choices: [{id: 'anthropic', label: 'Claude'}], keys: []
+}));
+assert.equal(noVendors.ok, true);
+assert.equal(noVendors.vendors.length, 0);
+
+const togglePatch = model.buildSettingsPatch('', [], [
+  {id: 'grok', enabled: true},
+  {id: 'zai', enabled: false}
+]);
+assert.equal(togglePatch.ok, true);
+assert.deepEqual(JSON.parse(togglePatch.payload), {
+  schema_version: 1, keys: {}, vendors: {grok: true, zai: false}
+});
+// A save with no pending toggle omits `vendors`, so an older binary still
+// accepts a display-only patch (its ApplyRequest denies unknown fields).
+const noTogglePatch = model.buildSettingsPatch('anthropic', []);
+assert.deepEqual(JSON.parse(noTogglePatch.payload), {
+  schema_version: 1, primary: 'anthropic', keys: {}
+});
+assert.equal(model.buildSettingsPatch('', [{id: 'kimi', action: 'clear'}], undefined).ok, true);
+assert.equal(model.buildSettingsPatch('', [], [{id: '__proto__', enabled: true}]).ok, false);
+assert.equal(model.buildSettingsPatch('', [], [{id: 'grok'}, {id: 'grok', enabled: true}]).ok, false);
+assert.equal(model.buildSettingsPatch('', [], [{id: 'grok', enabled: true}, {id: 'grok', enabled: false}]).ok, false);
+assert.equal(model.buildSettingsPatch('', [], [{id: 'grok', enabled: 'on'}]).ok, false);
+assert.equal(model.buildSettingsPatch('', [], []).ok, false);
+
 // Top bar window pinning: auto keeps history, session/weekly/monthly pin one
 // window class, unknown pins fall back to highest instead of blanking.
 assert.equal(model.normalizeBarWindow('auto'), 'auto');
@@ -675,16 +850,189 @@ const scopedWeekly = model.parseReport(JSON.stringify({entries: [{
   ]
 }]})).entries[0];
 assert.equal(model.headline(scopedWeekly, 'weekly').text, '88%');
-// Pools without any window shape (Cursor-style) fall back to highest.
+// Cursor's two pools are model categories, so the bar shows both side by
+// side no matter which time window is pinned. Left is Cursor Models.
 const cursorLike = model.parseReport(JSON.stringify({entries: [{
-  id: 'cursor', error: null,
+  id: 'cursor', error: null, icon: '❯',
   sections: [
     {type: 'metric', label: 'Cursor Models', percent: 80, value: '80%', detail: '', severity: 'high'},
     {type: 'metric', label: 'Other Models', percent: 20, value: '20%', detail: '', severity: 'low'}
   ]
 }]})).entries[0];
-assert.equal(model.headline(cursorLike, 'weekly').text, '80%');
-assert.equal(model.headline(cursorLike, 'session').text, '80%');
+assert.equal(model.headline(cursorLike, 'weekly').text, '80% · 20%');
+assert.equal(model.headline(cursorLike, 'session').text, '80% · 20%');
+assert.equal(model.headline(cursorLike, 'auto').text, '80% · 20%');
+assert.equal(model.headline(cursorLike).severity, 'high');
+assert.equal(model.headline(cursorLike).percent, 80);
+assert.equal(model.headline(cursorLike).tooltip, 'Cursor Models · 80%\nCursor Other Models · 20%');
+assert.equal(model.isAlarming(cursorLike), false);
+assert.equal(model.barChips([cursorLike], cursorLike, true, true, false, false, false, false)[0].label, '80% · 20%');
+assert.equal(model.barChips([cursorLike], cursorLike, true, true, false, false, false, false)[0].brand, 'cursor.svg');
+assert.equal(model.barStrip([cursorLike], false, false, true, false, false), '❯  80% · 20%');
+const cursorNamed = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor@work', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 35, value: '35%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 7, value: '7%', detail: '', severity: 'low'}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorNamed).text, '35% · 7%');
+const cursorPrepaid = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 35, value: '35%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 7, value: '7%', detail: '', severity: 'low'},
+    {type: 'text', label: 'On-Demand', value: '$0.00 / $5.00'}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorPrepaid).text, '35% · 7% · 0%');
+assert.equal(model.headline(cursorPrepaid).tooltip, 'Cursor Models · 35%\nCursor Other Models · 7%\nCursor On Demand · 0%');
+assert.equal(model.headline(cursorPrepaid).severity, 'low');
+const prepaidRow = model.groupedSections(cursorPrepaid.sections).filter(row => row.label === 'On-Demand')[0];
+assert.equal(prepaidRow.type, 'metric');
+assert.equal(prepaidRow.percent, 0);
+assert.equal(prepaidRow.value, '$5.00');
+assert.equal(prepaidRow.detail, '$0.00 of $5.00 used (0%)');
+const cursorSpent = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 35, value: '35%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 7, value: '7%', detail: '', severity: 'low'},
+    {type: 'text', label: 'On-Demand', value: '$1.25 / $5.00'}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorSpent).text, '35% · 7% · 25%');
+assert.equal(model.groupedSections(cursorSpent.sections).filter(row => row.label === 'On-Demand')[0].value, '$3.75');
+assert.equal(model.groupedSections(cursorSpent.sections).filter(row => row.label === 'On-Demand')[0].percent, 25);
+const cursorDemandHot = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 10, value: '10%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 7, value: '7%', detail: '', severity: 'low'},
+    {type: 'text', label: 'On-Demand', value: '$4.80 / $5.00'}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorDemandHot).text, '10% · 7% · 96%');
+assert.equal(model.headline(cursorDemandHot).severity, 'critical');
+assert.equal(model.isAlarming(cursorDemandHot), true);
+// The report's cents win over the formatted value, including a value that
+// is not money at all. Percent comes from the row; dollars left come from
+// the cents.
+const cursorNumeric = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 35, value: '35%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 7, value: '7%', detail: '', severity: 'low'},
+    {type: 'text', label: 'On-Demand', value: 'not money', used_cents: 125, limit_cents: 500, percent: 25}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorNumeric).text, '35% · 7% · 25%');
+const numericRow = model.groupedSections(cursorNumeric.sections).filter(row => row.label === 'On-Demand')[0];
+assert.equal(numericRow.value, '$3.75');
+assert.equal(numericRow.percent, 25);
+assert.equal(numericRow.detail, '$1.25 of $5.00 used (25%)');
+const cursorContradicts = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 35, value: '35%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 7, value: '7%', detail: '', severity: 'low'},
+    {type: 'text', label: 'On-Demand', value: '$9.00 / $10.00', used_cents: 0, limit_cents: 500, percent: 0}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorContradicts).text, '35% · 7% · 0%');
+assert.equal(model.groupedSections(cursorContradicts.sections).filter(row => row.label === 'On-Demand')[0].value, '$5.00');
+// Cents without a percent still meter. A fractional cent is not minor units
+// and falls back to the formatted value.
+const cursorCentsOnly = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 10, value: '10%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 7, value: '7%', detail: '', severity: 'low'},
+    {type: 'text', label: 'On-Demand', value: 'not money', used_cents: 480, limit_cents: 500}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorCentsOnly).text, '10% · 7% · 96%');
+const cursorFractional = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 10, value: '10%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 7, value: '7%', detail: '', severity: 'low'},
+    {type: 'text', label: 'On-Demand', value: '$4.80 / $5.00', used_cents: 480.5, limit_cents: 500, percent: 96}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorFractional).text, '10% · 7% · 96%');
+assert.equal(model.groupedSections(cursorFractional.sections).filter(row => row.label === 'On-Demand')[0].value, '$0.20');
+const cursorOver = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 10, value: '10%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 7, value: '7%', detail: '', severity: 'low'},
+    {type: 'text', label: 'On-Demand', value: 'not money', used_cents: 600, limit_cents: 500, percent: 120}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorOver).text, '10% · 7% · 120%');
+assert.equal(model.headline(cursorOver).severity, 'critical');
+assert.equal(model.groupedSections(cursorOver.sections).filter(row => row.label === 'On-Demand')[0].value, '$0.00');
+assert.equal(model.groupedSections(cursorOver.sections).filter(row => row.label === 'On-Demand')[0].detail, '$6.00 of $5.00 used (120%)');
+const hideDemand = { models: true, other: true, demand: false };
+const hideModels = { models: false, other: true, demand: true };
+assert.equal(model.cursorDualHeadline(cursorPrepaid, hideDemand).text, '35% · 7%');
+assert.equal(model.cursorDualHeadline(cursorPrepaid, hideDemand).tooltip, 'Cursor Models · 35%\nCursor Other Models · 7%');
+assert.equal(model.cursorDualHeadline(cursorPrepaid, hideModels).text, '7% · 0%');
+assert.equal(model.cursorDualHeadline(cursorPrepaid, hideModels).tooltip, 'Cursor Other Models · 7%\nCursor On Demand · 0%');
+assert.equal(model.cursorDualHeadline(cursorPrepaid, { models: false, other: false, demand: true }).text, '0%');
+assert.equal(model.cursorDualHeadline(cursorDemandHot, { models: false, other: false, demand: false }).text, '10%');
+assert.equal(model.cursorDualHeadline(cursorDemandHot, { models: true, other: true, demand: false }).severity, 'low');
+const viaDemandFirst = model.toggleCursorPool(model.toggleCursorPool({ models: true, other: true, demand: true }, 'demand'), 'models');
+const viaModelsFirst = model.toggleCursorPool(model.toggleCursorPool({ models: true, other: true, demand: true }, 'models'), 'demand');
+assert.equal(viaDemandFirst.models, viaModelsFirst.models);
+assert.equal(viaDemandFirst.other, viaModelsFirst.other);
+assert.equal(viaDemandFirst.demand, viaModelsFirst.demand);
+assert.equal(viaDemandFirst.models, false);
+assert.equal(viaDemandFirst.other, true);
+assert.equal(viaDemandFirst.demand, false);
+assert.equal(model.cursorDualHeadline(cursorPrepaid, viaDemandFirst).text, '7%');
+const keptLast = model.toggleCursorPool({ models: false, other: false, demand: true }, 'demand');
+assert.equal(keptLast.models, false);
+assert.equal(keptLast.other, false);
+assert.equal(keptLast.demand, true);
+// On-demand with no prepaid row cannot be the pool that keeps the bar alive.
+const demandOnly = { models: false, other: false, demand: true };
+assert.equal(model.cursorPoolPresence(cursorLike).demand, false);
+assert.equal(model.cursorPoolPresence(cursorPrepaid).demand, true);
+assert.equal(model.cursorBarFlags(cursorLike, demandOnly).models, true);
+assert.equal(model.cursorBarFlags(cursorLike, demandOnly).demand, false);
+assert.equal(model.cursorDualHeadline(cursorLike, demandOnly).text, '80%');
+assert.equal(model.cursorDualHeadline(cursorLike, demandOnly).severity, 'high');
+// The quieter pool can still be the one that alarms.
+const cursorApiHot = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 10, value: '10%', detail: '', severity: 'low'},
+    {type: 'metric', label: 'Other Models', percent: 95, value: '95%', detail: '', severity: 'critical'}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorApiHot).text, '10% · 95%');
+assert.equal(model.headline(cursorApiHot).severity, 'critical');
+assert.equal(model.isAlarming(cursorApiHot), true);
+assert.equal(model.cursorDualHeadline(cursorApiHot, { models: true, other: false, demand: false }).severity, 'low');
+// One pool, or the same labels on another vendor, stays a single figure.
+const cursorOne = model.parseReport(JSON.stringify({entries: [{
+  id: 'cursor', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 80, value: '80%', detail: '', severity: 'high'}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorOne).text, '80%');
+assert.equal(model.headline(cursorOne).tooltip, undefined);
+const cursorLabelsElsewhere = model.parseReport(JSON.stringify({entries: [{
+  id: 'custom:cursorish', error: null,
+  sections: [
+    {type: 'metric', label: 'Cursor Models', percent: 80, value: '80%', detail: '', severity: 'high'},
+    {type: 'metric', label: 'Other Models', percent: 20, value: '20%', detail: '', severity: 'low'}
+  ]
+}]})).entries[0];
+assert.equal(model.headline(cursorLabelsElsewhere).text, '80%');
 // Buckets without any window shape (Copilot-style) fall back to highest.
 const copilotLike = model.parseReport(JSON.stringify({entries: [{
   id: 'copilot', error: null,

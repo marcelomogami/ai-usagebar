@@ -2,7 +2,6 @@ import { useEffect, useState, type ReactNode } from "react";
 import MdiEyeOff from "~icons/mdi/eye-off-outline";
 import MdiPin from "~icons/mdi/pin-outline";
 import MdiPinOff from "~icons/mdi/pin-off-outline";
-import MdiRefresh from "~icons/mdi/refresh";
 import MdiStar from "~icons/mdi/star";
 import MdiStarOutline from "~icons/mdi/star-outline";
 import MdiTune from "~icons/mdi/tune-variant";
@@ -13,8 +12,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { m } from "@/paraglide/messages.js";
 
-export type RowAction = "always" | "customize" | "demand" | "hide" | "refresh" | "star";
+export type RowAction = "always" | "customize" | "demand" | "hide" | "star";
 
 interface RowMenuProps {
   children: ReactNode;
@@ -24,10 +24,6 @@ interface RowMenuProps {
   onAction: (action: RowAction) => void;
   onOpenChange: (open: boolean) => void;
 }
-
-/** Same item chrome as the footer Options menu (Chrome.MenuItem). */
-const ITEM_CLASS =
-  "gap-2 rounded-[var(--radius-sm)] px-2 py-[5px] text-[13px] focus:bg-[var(--card)] focus:text-label-1 [&_svg]:size-[15px] [&_svg]:text-label-2 focus:[&_svg]:text-label-2";
 
 /**
  * Right-click menu for one dashboard row: hide it, move it between Always Visible and On Demand,
@@ -64,34 +60,30 @@ export function RowMenu({ children, inAlways, providerTitle, starred, onAction, 
           <span aria-hidden="true" className="pointer-events-none absolute inset-0" tabIndex={-1} />
         </DropdownMenuTrigger>
       </div>
-      <DropdownMenuContent align="end" sideOffset={2} className="min-w-[184px] rounded-[10px] p-[5px] shadow-lg">
-        <DropdownMenuItem className={ITEM_CLASS} onSelect={() => onAction("hide")}>
+      <DropdownMenuContent align="end" sideOffset={2}>
+        <DropdownMenuItem onSelect={() => onAction("hide")}>
           <MdiEyeOff />
-          <span className="flex-1">Hide row</span>
+          <span className="flex-1">{m.hide_row()}</span>
         </DropdownMenuItem>
-        <DropdownMenuItem className={ITEM_CLASS} onSelect={() => onAction("star")}>
+        <DropdownMenuItem onSelect={() => onAction("star")}>
           {starred ? <MdiStar /> : <MdiStarOutline />}
-          <span className="flex-1">{starred ? "Unstar from menu bar" : "Star for menu bar"}</span>
+          <span className="flex-1">{starred ? m.unstar_from_menu_bar() : m.star_for_menu_bar()}</span>
         </DropdownMenuItem>
         {inAlways ? (
-          <DropdownMenuItem className={ITEM_CLASS} onSelect={() => onAction("demand")}>
+          <DropdownMenuItem onSelect={() => onAction("demand")}>
             <MdiPinOff />
-            <span className="flex-1">Show on demand</span>
+            <span className="flex-1">{m.show_on_demand()}</span>
           </DropdownMenuItem>
         ) : (
-          <DropdownMenuItem className={ITEM_CLASS} onSelect={() => onAction("always")}>
+          <DropdownMenuItem onSelect={() => onAction("always")}>
             <MdiPin />
-            <span className="flex-1">Always show</span>
+            <span className="flex-1">{m.always_show()}</span>
           </DropdownMenuItem>
         )}
         <DropdownMenuSeparator />
-        <DropdownMenuItem className={ITEM_CLASS} onSelect={() => onAction("refresh")}>
-          <MdiRefresh />
-          <span className="flex-1">Refresh {providerTitle}</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem className={ITEM_CLASS} onSelect={() => onAction("customize")}>
+        <DropdownMenuItem onSelect={() => onAction("customize")}>
           <MdiTune />
-          <span className="flex-1">Customize {providerTitle}</span>
+          <span className="flex-1">{m.customize()} {providerTitle}</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

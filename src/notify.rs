@@ -13,9 +13,8 @@
 //! - [`NotifyState`] is the persisted dedupe map
 //!   (`~/.cache/ai-usagebar/notifications.json`), written atomically under
 //!   the same flock discipline as the vendor caches.
-//! - [`NotifySink`] is the delivery seam. Slice 1 ships `notify-send` on
-//!   Linux and a no-op everywhere else; macOS and Windows delivery slot in
-//!   as new sinks without touching the decision or the state.
+//! - [`NotifySink`] delivers through `notify-send` on Linux and Notification
+//!   Center on macOS, without changing the decision or persisted state.
 //!
 //! Everything here is best-effort: a missing notifier, an unwritable state
 //! file, or a contended lock is a silent skip — a missed notification beats
@@ -41,6 +40,18 @@ use crate::format;
 /// threshold (97 → 96 → 97) does not re-fire on every refresh.
 const HYSTERESIS_PCT: i32 = 7;
 
+/// How much later a reported reset instant has to be before it counts as a new
+/// window. Vendors report that instant with sub-second precision that jitters
+/// between fetches — Anthropic's five-hour window came back 0.7s apart on two
+/// fetches four minutes apart — and a rolling window slides its reset forward
+/// with the refresh interval, so a strict comparison re-armed the key and
+/// re-notified on refresh with nothing changed. Ninety minutes clears every
+/// refresh interval this ships with (the bar's default is five minutes and its
+/// maximum an hour; the tray refreshes every ten at most) and stays far below
+/// the shortest window, so a real new window still moves the instant by more
+/// than this.
+const RESET_MOVE_TOLERANCE_SECS: i64 = 90 * 60;
+
 /// How long before a banked reset credit's expiry the warning fires.
 const CREDIT_WARNING_SECS: i64 = 48 * 3600;
 
@@ -49,6 +60,7 @@ const CREDIT_WARNING_SECS: i64 = 48 * 3600;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A notifier that hangs must not hang the bar with it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const SPAWN_KILL_AFTER: Duration = Duration::from_secs(5);
 
 /// Urgency band for one notification. `notify-send`'s `-u` maps directly.
@@ -60,6 +72,7 @@ pub enum Urgency {
     Critical,
 }
 
+#[cfg(target_os = "linux")]
 impl Urgency {
     fn as_arg(self) -> &'static str {
         match self {
@@ -187,10 +200,13 @@ pub fn decide(
 
 /// `true` when `current` is a later reset than `snapshot` — a `None → Some`
 /// change counts (the vendor started reporting a reset), `Some → None` and
-/// backwards moves do not.
+/// backwards moves do not, and so do not moves within
+/// [`RESET_MOVE_TOLERANCE_SECS`], which are the same window reported again.
 fn reset_moved_later(current: Option<DateTime<Utc>>, snapshot: Option<DateTime<Utc>>) -> bool {
     match (current, snapshot) {
-        (Some(current), Some(snapshot)) => current > snapshot,
+        (Some(current), Some(snapshot)) => {
+            current.signed_duration_since(snapshot).num_seconds() > RESET_MOVE_TOLERANCE_SECS
+        }
         (Some(_), None) => true,
         _ => false,
     }
@@ -310,8 +326,7 @@ impl NotifyState {
 
 // ─── Delivery seam ─────────────────────────────────────────────────────────
 
-/// Delivery backend. Implementations own one platform each; slice 1 ships
-/// `notify-send` on Linux and a no-op elsewhere.
+/// Delivery backend. Implementations own one platform each.
 ///
 /// `deliver` returns nothing and must never panic: a failing or missing
 /// notifier is ALWAYS a silent no-op, and nothing in this module may change
@@ -320,13 +335,12 @@ pub trait NotifySink {
     fn deliver(&mut self, notification: &Notification);
 }
 
-/// The do-nothing sink: non-Linux delivery is a later slice, and until it
-/// lands the check runs (state stays correct) without side effects.
-#[cfg(any(not(target_os = "linux"), test))]
+/// The do-nothing sink for platforms without a desktop delivery backend.
+#[cfg(any(not(any(target_os = "linux", target_os = "macos")), test))]
 #[derive(Debug, Default)]
 pub struct NoopSink;
 
-#[cfg(any(not(target_os = "linux"), test))]
+#[cfg(any(not(any(target_os = "linux", target_os = "macos")), test))]
 impl NotifySink for NoopSink {
     fn deliver(&mut self, _notification: &Notification) {}
 }
@@ -387,9 +401,9 @@ impl NotifySink for NotifySendSink {
     }
 }
 
-/// Wait for the notifier, killing it at the cap. `notify-send` normally
-/// returns in milliseconds; the cap only matters when the daemon is wedged.
-#[cfg(target_os = "linux")]
+/// Wait for the notifier, killing it at the cap. Desktop delivery normally
+/// returns in milliseconds; the cap only matters when the service is wedged.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn reap(mut child: std::process::Child) {
     let deadline = std::time::Instant::now() + SPAWN_KILL_AFTER;
     loop {
@@ -410,8 +424,35 @@ fn reap(mut child: std::process::Child) {
 fn production_sink() -> Box<dyn NotifySink + Send> {
     #[cfg(target_os = "linux")]
     return Box::new(NotifySendSink::new());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    return Box::new(MacNotificationSink);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     return Box::new(NoopSink);
+}
+
+/// AppleScript's Standard Additions sends a native Notification Center banner.
+/// Passing title and body as argv keeps provider text out of the script source.
+#[cfg(target_os = "macos")]
+struct MacNotificationSink;
+
+#[cfg(target_os = "macos")]
+impl NotifySink for MacNotificationSink {
+    fn deliver(&mut self, notification: &Notification) {
+        const SCRIPT: &str = "on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run";
+        let spawned = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(SCRIPT)
+            .arg("--")
+            .arg(&notification.title)
+            .arg(&notification.body)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(child) = spawned {
+            reap(child);
+        }
+    }
 }
 
 // ─── Orchestration ─────────────────────────────────────────────────────────
@@ -519,33 +560,23 @@ impl RefreshInput {
                 _ => None,
             })
             .collect();
-        let credits = match &ready.snapshot {
-            crate::usage::VendorSnapshot::Openai(snapshot) => &snapshot.reset_credits,
-            crate::usage::VendorSnapshot::SuperGrok(snapshot) => &snapshot.reset_credits,
-            _ => {
-                return Some(Self {
-                    entry_id,
-                    vendor,
-                    account: tab.account.clone(),
-                    rows,
-                    credits: Vec::new(),
-                });
-            }
-        };
-        let credits = if credits.available > 0 {
-            credits
-                .credits
-                .iter()
-                .filter_map(|credit| {
-                    credit.expires_at.map(|expires_at| CreditExpiry {
-                        title: credit.title.clone(),
-                        expires_at,
+        let credits = ready
+            .snapshot
+            .reset_credits()
+            .filter(|credits| credits.available > 0)
+            .map(|credits| {
+                credits
+                    .credits
+                    .iter()
+                    .filter_map(|credit| {
+                        credit.expires_at.map(|expires_at| CreditExpiry {
+                            title: credit.title.clone(),
+                            expires_at,
+                        })
                     })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+                    .collect()
+            })
+            .unwrap_or_default();
         Some(Self {
             entry_id,
             vendor,
@@ -687,6 +718,40 @@ mod tests {
         assert!(!state.is_notified("anthropic@gmail::Weekly (7d)"));
         // …so the next crossing is a new crossing.
         assert_eq!(fires_at(97, &mut state), 1, "re-armed crossing fires");
+    }
+
+    #[test]
+    fn a_jittered_reset_instant_is_the_same_window() {
+        // Observed live on Anthropic's five-hour window: two fetches four
+        // minutes apart reported the same window's reset 0.70s apart, and the
+        // strict comparison re-armed the key and re-notified on refresh with
+        // nothing changed.
+        let mut state = NotifyState::default();
+        let now = at(23, 12, 0);
+        let reset = at(23, 17, 0);
+        let first = input(vec![row("Session (5h)", 100, Some(reset))]);
+        assert_eq!(decide(&first, 97, &mut state, now).len(), 1);
+
+        for drift in [
+            chrono::Duration::milliseconds(488),
+            chrono::Duration::milliseconds(700),
+            chrono::Duration::seconds(59),
+        ] {
+            let jittered = input(vec![row("Session (5h)", 100, Some(reset + drift))]);
+            assert_eq!(
+                decide(&jittered, 97, &mut state, now).len(),
+                0,
+                "{drift:?} later is the same window"
+            );
+        }
+
+        // A window that really rolled over moves the instant by its length.
+        let next_window = input(vec![row(
+            "Session (5h)",
+            100,
+            Some(reset + chrono::Duration::hours(5)),
+        )]);
+        assert_eq!(decide(&next_window, 97, &mut state, now).len(), 1);
     }
 
     #[test]
@@ -1053,6 +1118,16 @@ mod tests {
                 sonnet: None,
                 scoped: vec![],
                 extra: None,
+                // Claude banks resets too, and the expiry warning is the
+                // whole point of carrying them: a grant the sidebar lists but
+                // the notifier ignores is a half-delivered feature.
+                reset_credits: ResetCredits {
+                    available: 1,
+                    credits: vec![ResetCredit {
+                        title: Some("Opus 5.5 launch reset".into()),
+                        expires_at: Some(at(25, 0, 0)),
+                    }],
+                },
             }),
             stale: false,
             last_error: None,
@@ -1072,6 +1147,13 @@ mod tests {
                 row("Session (5h)", 98, Some(reset)),
                 row("Weekly (7d)", 42, None),
             ]
+        );
+        assert_eq!(
+            projected.credits,
+            vec![CreditExpiry {
+                title: Some("Opus 5.5 launch reset".into()),
+                expires_at: at(25, 0, 0),
+            }]
         );
 
         // A Codex snapshot carries its banked credits through.

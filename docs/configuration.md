@@ -21,7 +21,7 @@ ai-usagebar-tui --config ./config.test.toml
 # is selected when the TUI opens. Defaults to anthropic when not set.
 # Only a vendor that is enabled can be primary.
 # primary = "anthropic"   # anthropic | anthropic_api | openai | copilot | ollama
-#                         # | zai | openrouter | deepseek | kimi | kilo | novita
+#                         # | zai | openrouter | deepseek | deepinfra | kimi | kilo | novita
 #                         # | moonshot | grok | supergrok | grokbot | antigravity | cursor
 #                         # | minimax | kiro | nous | opencode-go | commandcode
 #                         # | orcarouter | modelstudio
@@ -32,10 +32,14 @@ enabled = false           # opt in, then press c in ai-usagebar-tui
 # context_window_tokens = 200000  # optional fallback denominator
 # [context.model_context_window_tokens]
 # "claude-opus-4-6" = 1000000    # exact model id overrides the fallback
+# While enabled, `usage` (and the tray/Omarchy panels built on it) also shows
+# the most recent Claude Code sessions on the Claude entry as a "Sessions"
+# group: one row per session with its context health on the same severity
+# colors as quota meters, plus the model and last-active time.
 
 # Quota-threshold desktop notifications. On by default at 97%: a window that
 # crosses the threshold raises one notification per crossing (Linux uses
-# notify-send; macOS and Windows delivery follow). A window re-arms only when
+# notify-send; macOS uses Notification Center; Windows delivery follows). A window re-arms only when
 # usage drops 7 points below the threshold or its reset moves later, and
 # banked reset credits (Codex, SuperGrok) notify 48h before they expire.
 # [notifications]
@@ -77,12 +81,22 @@ api_key_env = "OPENROUTER_API_KEY"
 # label = "work"
 # api_key_env = "OPENROUTER_WORK_API_KEY"
 # api_key = "sk-or-v1-..."      # optional fallback; chmod 600 if inline
+# One entry per workspace; keys inside one workspace share its billing
+# account, so the per-entry split is per login session, not per key within
+# a bill. See docs/openrouter-accounts.md.
 
 [deepseek]
 enabled = true             # disabled by default; enable once you add an API key
 api_key_env = "DEEPSEEK_API_KEY"
 # api_key = "sk-..."       # used if DEEPSEEK_API_KEY is unset; chmod 600 the file!
 # display_limit = 200      # tank size in USD; see "Balance tanks" below
+# headline = "amount"      # "amount" | "percent"
+
+[deepinfra]
+enabled = true             # disabled by default; enable once you add an API key
+api_key_env = "DEEPINFRA_API_KEY"
+# api_key = "..."          # used if DEEPINFRA_API_KEY is unset; chmod 600 the file!
+# display_limit = 50       # optional prepaid tank size in USD
 # headline = "amount"      # "amount" | "percent"
 
 [kimi]
@@ -218,7 +232,10 @@ enabled = false            # disabled by default; enable after `bl auth login --
 
 For more than one OpenRouter key, see the
 [OpenRouter account guide](openrouter-accounts.md). The existing singular
-`[openrouter]` key remains the default account and needs no migration.
+`[openrouter]` key remains the default account and needs no migration. Z.AI,
+DeepSeek, DeepInfra, Kilo, Novita, Moonshot, Grok, MiniMax, and OrcaRouter take the same
+`[[<vendor>.accounts]]` array and `show_default_account` switch — see the
+[API-key account guide](api-key-accounts.md).
 
 ### Notifications
 
@@ -226,12 +243,16 @@ For more than one OpenRouter key, see the
 default at 97%: after a **fresh** fetch (never a cached or failed one), any
 window at or above the threshold raises one notification — normal urgency
 between the threshold and 99%, critical at 100% (exhausted). Linux delivers
-via `notify-send` (`-a ai-usagebar -c quota`); macOS and Windows delivery
-land in a later release.
+via `notify-send` (`-a ai-usagebar -c quota`); macOS delivers through
+Notification Center. The macOS popover also exposes the enable switch and
+threshold in Preferences. Windows delivery is planned for a later release.
 
 One crossing is one notification. A key re-arms only when usage drops 7
 percentage points below the threshold (97 → below 90) or when the window's
-reset moves to a later instant, and the dedupe state lives in
+reset moves to a later instant by more than an hour and a half — a smaller move
+is the same window reported again, since vendors report the instant with
+sub-second drift between fetches and a rolling window slides it forward with
+the refresh interval — and the dedupe state lives in
 `~/.cache/ai-usagebar/notifications.json` behind the same file locking as the
 vendor caches. Banked reset credits (Codex, SuperGrok) also notify once, 48
 hours before each credit expires. Bodies carry only vendor-reported absolute
@@ -244,7 +265,7 @@ overlay (`s`).
 
 ### Balance tanks
 
-DeepSeek, Kilo, Novita, Moonshot and prepaid Grok report how much money is
+DeepSeek, DeepInfra, Kilo, Novita, Moonshot and prepaid Grok report how much money is
 **left** and nothing else. There is no denominator in those responses, so
 there is nothing to draw a meter against and the row is a plain balance.
 
@@ -259,6 +280,10 @@ display_limit = 200        # you topped up $200 and want to watch it burn down
 It must be finite and greater than zero; anything else fails at load with the
 offending section named. There is no default and no built-in figure: leave it
 out and nothing changes.
+
+DeepInfra also shows the current calendar-month spend and the account's monthly
+spending limit when the API supplies one. Its `display_limit` affects only the
+prepaid-balance tank; it never replaces the provider's monthly limit.
 
 It is a fallback, never an override: a vendor that states a limit of its own
 keeps it. That is why **`[openrouter]` has no `display_limit` at all**. It
@@ -327,6 +352,13 @@ Create the second login with `CODEX_HOME=~/.codex-work codex login` and point
 `codex_auth_path` at the file it writes. Select it with `--account work`; each
 account caches separately under `~/.cache/ai-usagebar/openai/<label>`. The
 singular `codex_auth_path` remains the default account and needs no migration.
+
+`ai-usagebar account add <label> --codex` writes that entry and runs the login
+for you; `ai-usagebar account switch <label> --codex` makes a named login the
+one the Codex CLI, desktop app and IDE extension use. See "Switch Codex" in
+[claude-accounts.md](claude-accounts.md). Once every login is named, set
+`[openai] show_default_account = false` so the active account is not listed a
+second time as the unnamed default.
 
 ### Explicitly enable a provider
 

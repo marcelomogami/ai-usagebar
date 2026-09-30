@@ -63,23 +63,29 @@
 # label = "Tier"
 # value = "/account/tier"        # string, number or boolean
 
-# Windows tray popover only. Every key is written by the popover's Settings
-# screen; editing them here works too.
+# Windows/macOS tray. The macOS menu bar also writes its options here from the
+# popover Settings → Menu Bar.
 # [tray]
 # Global shortcut that opens and closes the popover from any window.
 # Ctrl / Alt / Win plus a key; Shift may be added. Omit for none.
 # shortcut = "Ctrl+Shift+U"
-# How often the tray re-reads every provider: 1, 5 or 10 minutes; the footer's
-# Refresh is always immediate.
+# How often the tray re-reads every provider: 1, 5 or 10 minutes; the panel's
+# Refresh button is always immediate.
 # refresh_minutes = 5
 # New releases: auto (download, verify and restart unattended) | notify
 # (banner with an Install button; default) | off (no background checks).
 # updates = "notify"
+# macOS menu bar: "bars" (default) draws the usage chart; "provider" draws each
+# provider's logo followed by its value. Both show the metrics starred in each
+# provider (up to two). Settings → Menu Bar → Menu Bar Shows sets it.
+# menu_bar_style = "bars"
 
 # Quota-threshold desktop notifications, fired after a fresh fetch when a
-# window crosses the threshold (Linux notify-send today; macOS and Windows
-# delivery follow). One notification per crossing: a window re-arms only when
-# usage drops 7 points below the threshold or the window's reset moves later.
+# window crosses the threshold (Linux notify-send or macOS Notification Center;
+# Windows delivery follows). One notification per crossing: a window re-arms only when
+# usage drops 7 points below the threshold or the window's reset moves later by
+# more than an hour and a half — a smaller move is the same window reported
+# again, with the sub-second drift the vendors' reset instants carry.
 # Banked reset credits (Codex, SuperGrok) also notify 48h before they expire.
 # [notifications]
 # enabled = true    # false turns every quota/expiry notification off
@@ -170,6 +176,10 @@ enabled = true
 # Named accounts get isolated caches (~/.cache/ai-usagebar/openai/<label>) and
 # are selected with `--account <label>`; without it you get the default login
 # above, exactly as before.
+# `ai-usagebar account switch <label> --codex` moves a named login into
+# ~/.codex/auth.json (docs/claude-accounts.md, "Switch Codex"). Once every login
+# is named, hide the unnamed default tab so the active account is not listed twice:
+# show_default_account = false
 # [[openai.accounts]]
 # label = "work"
 # codex_auth_path = "~/.config/ai-usagebar/accounts/work-codex/auth.json"
@@ -206,6 +216,8 @@ api_key_env = "OPENROUTER_API_KEY"
 # display_limit here — see the "Account-balance vendors" note below.
 # headline = "percent"           # "percent" | "amount"
 # Named keys appear as separate TUI/report entries and use isolated caches.
+# One entry per workspace is the pattern; keys inside one workspace share its
+# billing account, so the split is per login session, not per key within a bill.
 # The default key above stays visible unless this is false. It is always kept
 # when no named accounts exist.
 # show_default_account = false
@@ -213,6 +225,12 @@ api_key_env = "OPENROUTER_API_KEY"
 # label = "work"
 # api_key_env = "OPENROUTER_WORK_API_KEY"
 # api_key = "sk-or-v1-..."  # optional fallback; chmod 600 when inline
+#
+# The same array works for [zai], [deepseek], [deepinfra], [kilo], [novita],
+# [moonshot], [grok], [minimax], and [orcarouter] — e.g.
+# [[deepinfra.accounts]] — with the same show_default_account switch.
+# Region/team/organization/display settings stay per provider. See
+# docs/api-key-accounts.md.
 
 [deepseek]
 # Disabled by default — enable once you've set a key (env var or inline).
@@ -224,6 +242,15 @@ api_key_env = "DEEPSEEK_API_KEY"  # checked first; if set + non-empty, used
 # Turn the balance into a meter by stating the tank size — see the
 # "Account-balance vendors" note below for both settings.
 # display_limit = 200             # e.g. a $200 top-up you want to burn down
+# headline = "amount"              # "amount" | "percent"
+
+[deepinfra]
+# Disabled by default. Reads prepaid balance and current-month usage from the
+# documented DeepInfra billing endpoints.
+enabled = false
+api_key_env = "DEEPINFRA_API_KEY"
+# api_key = "..."                  # fallback; prefer the environment variable
+# display_limit = 50                # optional prepaid tank size in USD
 # headline = "amount"              # "amount" | "percent"
 
 [ollama]
@@ -442,8 +469,9 @@ enabled = false
 # Override the cursor-agent CLI's own login file, tried only when db_path
 # does not exist. Leave commented out to use the platform default:
 #   Linux:   ~/.config/cursor/auth.json
-#   macOS:   ~/Library/Application Support/cursor/auth.json
-#   Windows: %APPDATA%\cursor\auth.json
+#   macOS:   ~/.cursor/auth.json (the CLI keeps its session in the Keychain
+#            there; the Keychain is read when this file is absent too)
+#   Windows: %APPDATA%\Cursor\auth.json
 # agent_auth_path = "/home/you/.config/cursor/auth.json"
 
 [minimax]
@@ -492,13 +520,11 @@ enabled = false
 api_key_env = "OPENCODE_GO_API_KEY"
 # api_key = "[REDACTED]"  # optional inline fallback; prefer the environment
 
-# Command Code (commandcode.ai). Enabled by default, like OpenAI/Codex; when no
-# local agent harness is signed in, its TUI tab reports that state. There is no
-# key to paste: the OAuth
-# credential written by the official `commandcode` CLI is reused as-is, and
-# it is only ever read, never refreshed or rewritten.
+# Command Code (commandcode.ai). Leave disabled if you do not use it. To opt in,
+# set enabled = true; the OAuth credential written by the official `commandcode`
+# CLI is reused as-is, never refreshed or rewritten.
 [commandcode]
-enabled = true
+enabled = false
 # Override where the credential is looked for. Leave commented out to search,
 # in order:
 #   ~/.commandcode/auth.json   (official command-code CLI)

@@ -8,6 +8,7 @@
 //! [zai]        enabled = true
 //! [openrouter] enabled = true
 //! [deepseek]   enabled = false
+//! [deepinfra]  enabled = false
 //! [kimi]       enabled = false
 //! [grokbot]    enabled = false  # Grok Bot desktop app's own session
 //! [modelstudio] enabled = false # `bl` CLI's own console login (Token Plan)
@@ -51,6 +52,7 @@ pub struct Config {
     pub zai: ZaiConfig,
     pub openrouter: OpenRouterConfig,
     pub deepseek: DeepseekConfig,
+    pub deepinfra: DeepInfraConfig,
     pub kimi: KimiConfig,
     pub kilo: KiloConfig,
     pub novita: NovitaConfig,
@@ -99,10 +101,9 @@ impl UiConfig {
     }
 }
 
-/// Windows tray popover preferences the host process needs before the
-/// WebView is up: the global shortcut it registers, how often it polls and
-/// how it treats new releases. Screen-only preferences (theme, density, time
-/// format) live in the popover's own storage instead.
+/// Tray preferences the host process needs before the WebView is up: shortcut,
+/// polling, updates, and the macOS menu-bar summary. Screen-only preferences
+/// (theme, density, time format) live in the popover's own storage instead.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TrayConfig {
@@ -114,6 +115,8 @@ pub struct TrayConfig {
     pub refresh_minutes: Option<u64>,
     /// What the tray does when a newer release is published.
     pub updates: Option<UpdateMode>,
+    /// macOS menu-bar presentation: `provider` (logos) or `bars` (default).
+    pub menu_bar_style: Option<String>,
 }
 
 /// Poll intervals the tray offers, in minutes. The provider cache TTL is
@@ -573,6 +576,56 @@ pub fn add_anthropic_account_to_doc(
     Ok(())
 }
 
+/// Where a newly-registered Codex account's `auth.json` lives by default:
+/// `~/.codex-<label>/auth.json`, the `CODEX_HOME` the docs have always
+/// suggested for a second login.
+pub fn default_codex_auth_path(home: &Path, label: &str) -> PathBuf {
+    home.join(format!(".codex-{label}")).join("auth.json")
+}
+
+/// Append a `[[openai.accounts]]` entry to a parsed config document, in place.
+/// The Codex counterpart of [`add_anthropic_account_to_doc`], with the same
+/// guarantees: only the new entry is added, and an invalid or duplicate label
+/// is an error.
+pub fn add_openai_account_to_doc(
+    doc: &mut toml_edit::DocumentMut,
+    label: &str,
+    codex_auth_path: &str,
+) -> Result<()> {
+    use toml_edit::{Item, Table, value};
+
+    validate_account_label_for("openai", label)?;
+
+    let openai = doc
+        .entry("openai")
+        .or_insert_with(|| Item::Table(Table::new()));
+    let openai = openai
+        .as_table_mut()
+        .ok_or_else(|| AppError::Other("[openai] in config.toml is not a table".into()))?;
+
+    let accounts = openai
+        .entry("accounts")
+        .or_insert_with(|| Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let accounts = accounts.as_array_of_tables_mut().ok_or_else(|| {
+        AppError::Other("[[openai.accounts]] in config.toml is not an array of tables".into())
+    })?;
+
+    if accounts
+        .iter()
+        .any(|t| t.get("label").and_then(Item::as_str) == Some(label))
+    {
+        return Err(AppError::Credentials(format!(
+            "openai account {label:?} already exists in config.toml"
+        )));
+    }
+
+    let mut table = Table::new();
+    table["label"] = value(label);
+    table["codex_auth_path"] = value(codex_auth_path);
+    accounts.push(table);
+    Ok(())
+}
+
 /// Set or update a boolean field in a TOML section, preserving comments and
 /// formatting of unaffected nodes. Shared by the Settings overlay and
 /// [`enable_vendors_in`] so both writers shape `enabled = true` identically.
@@ -655,6 +708,61 @@ pub fn set_tray_value(path: &Path, key: &str, value: Option<toml_edit::Value>) -
         return Ok(());
     }
     write_config_document(path, &doc)
+}
+
+/// Persist one validated notification preference without disturbing other
+/// config sections or their comments.
+pub fn set_notification_value(path: &Path, key: &str, value: toml_edit::Value) -> Result<()> {
+    match key {
+        "enabled" if value.as_bool().is_some() => {}
+        "threshold" if value.as_integer().is_some_and(|n| (1..=100).contains(&n)) => {}
+        _ => {
+            return Err(AppError::Other(format!(
+                "invalid notification preference: {key}"
+            )));
+        }
+    }
+    let mut doc = read_config_document(path)?;
+    let before = doc.to_string();
+    set_value(&mut doc, "notifications", key, Some(value))?;
+    if doc.to_string() == before {
+        return Ok(());
+    }
+    write_config_document(path, &doc)
+}
+
+/// Flip one provider's `enabled` switch in the config at `path`, creating the
+/// file and the provider's section when either doesn't exist and leaving every
+/// other line — comments, keys, unrelated sections — exactly as it was
+/// (#244). An unchanged document is not rewritten. This is the whitelisted
+/// writer the settings surfaces go through; the slug is validated inside
+/// [`set_vendor_enabled_in_doc`], so no caller can create an arbitrary
+/// section or reach a `[[custom]]` entry from here.
+pub fn set_vendor_enabled(path: &Path, slug: &str, enabled: bool) -> Result<()> {
+    let mut doc = read_config_document(path)?;
+    let before = doc.to_string();
+    set_vendor_enabled_in_doc(&mut doc, slug, enabled)?;
+    if doc.to_string() == before {
+        return Ok(());
+    }
+    write_config_document(path, &doc)
+}
+
+/// The validated core of [`set_vendor_enabled`], over an already-open
+/// document: strictly `slug → VendorId → config_section()` — never a
+/// caller-chosen section name — then the shared comment-preserving
+/// [`set_bool`] both the Settings overlay and `enable_vendors_in` use.
+pub fn set_vendor_enabled_in_doc(
+    doc: &mut toml_edit::DocumentMut,
+    slug: &str,
+    enabled: bool,
+) -> Result<()> {
+    let Some(vendor) = VendorId::from_slug(slug) else {
+        return Err(AppError::Other(format!(
+            "unknown provider {slug:?}: not a built-in vendor"
+        )));
+    };
+    set_bool(doc, vendor.config_section(), "enabled", enabled)
 }
 
 /// Read `path` into a `toml_edit` document with comments intact. A missing
@@ -746,6 +854,12 @@ pub struct OpenAiConfig {
     /// refreshes into whichever one it read.
     #[serde(default)]
     pub accounts: Vec<OpenAiAccount>,
+    /// Whether the default (unnamed) Codex login gets its own tab. Defaults to
+    /// `true`. Set `false` once every login is a named account — typically
+    /// after `account add <label> --codex --adopt-current` — so the default
+    /// `~/.codex/auth.json` does not also appear as a second copy of whichever
+    /// account is active. Ignored when there are no named accounts.
+    pub show_default_account: bool,
     /// Reserved, and inert: names the env var an API-key-only path *would*
     /// read (admin key → `/v1/organization/costs`). Nothing consumes it —
     /// OpenAI usage comes solely from Codex OAuth. Kept because that path is
@@ -798,6 +912,38 @@ impl OpenAiConfig {
                 ))
             })
     }
+
+    /// The auth file a fetch for `label` reads. Unlike
+    /// [`resolve_auth_path`](OpenAiConfig::resolve_auth_path), this follows
+    /// `account switch --codex`: the active account's login has been moved
+    /// into the default slot, so it is read there. The answer holds only while
+    /// no switch runs, so a fetch asks it under the credentials lock; see
+    /// [`fetch_snapshot_routed`](crate::openai::fetch_snapshot_routed).
+    pub fn fetch_auth_path(&self, label: Option<&str>) -> Result<PathBuf> {
+        let Some(label) = label else {
+            return self.resolve_auth_path(None);
+        };
+        let default = self.resolve_auth_path(None)?;
+        let active = crate::openai::account::resolve_active_label(&default, &self.accounts);
+        self.fetch_auth_path_probing(label, active.as_deref(), Path::exists)
+    }
+
+    /// The pure core of [`fetch_auth_path`](OpenAiConfig::fetch_auth_path),
+    /// with the active label and the file probe injected. The own file is
+    /// probed rather than assumed gone: an account signed in again under its
+    /// own `CODEX_HOME` keeps reading that file.
+    pub fn fetch_auth_path_probing(
+        &self,
+        label: &str,
+        active: Option<&str>,
+        exists: impl Fn(&Path) -> bool,
+    ) -> Result<PathBuf> {
+        let own = self.resolve_auth_path(Some(label))?;
+        if active == Some(label) && !exists(&own) {
+            return self.resolve_auth_path(None);
+        }
+        Ok(own)
+    }
 }
 
 impl Default for OpenAiConfig {
@@ -806,6 +952,7 @@ impl Default for OpenAiConfig {
             enabled: true,
             codex_auth_path: None,
             accounts: Vec::new(),
+            show_default_account: true,
             admin_key_env: "OPENAI_ADMIN_KEY".to_string(),
         }
     }
@@ -866,23 +1013,13 @@ pub struct OpenCodeGoConfig {
 
 /// Command Code reads the OAuth credential from the official CLI or pi, so it
 /// has no API key of its own. `auth_paths` overrides that search list for a
-/// non-standard install. It is enabled by default, like OpenAI/Codex; when no
-/// local credential exists the TUI reports that tab as unavailable instead of
-/// silently hiding the provider.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// non-standard install. It is disabled until explicitly enabled or detected
+/// from a local credential.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CommandCodeConfig {
     pub enabled: bool,
     pub auth_paths: Option<Vec<PathBuf>>,
-}
-
-impl Default for CommandCodeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            auth_paths: None,
-        }
-    }
 }
 
 /// Ollama Cloud (`ollama.com/api/usage`). Disabled by default: the local
@@ -917,6 +1054,13 @@ impl Default for OllamaConfig {
 #[serde(default)]
 pub struct OrcaRouterConfig {
     pub enabled: bool,
+    /// Extra accounts beyond the default key (#221's array, generalized).
+    /// Each account gets a separate aggregate-view entry and cache directory.
+    pub accounts: Vec<ApiKeyAccount>,
+    /// Whether aggregate views include the default (unnamed) key when named
+    /// accounts exist. Ignored when `accounts` is empty so OrcaRouter never
+    /// loses its only tab.
+    pub show_default_account: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
 }
@@ -925,6 +1069,8 @@ impl Default for OrcaRouterConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            accounts: Vec::new(),
+            show_default_account: true,
             api_key_env: "ORCAROUTER_API_KEY".to_string(),
             api_key: None,
         }
@@ -962,6 +1108,13 @@ impl Default for OpenCodeGoConfig {
 #[serde(default)]
 pub struct ZaiConfig {
     pub enabled: bool,
+    /// Extra accounts beyond the default key (#221's array, generalized).
+    /// Each account gets a separate aggregate-view entry and cache directory.
+    pub accounts: Vec<ApiKeyAccount>,
+    /// Whether aggregate views include the default (unnamed) key when named
+    /// accounts exist. Ignored when `accounts` is empty so Z.AI never
+    /// loses its only tab.
+    pub show_default_account: bool,
     /// Env var name to read the key from (env wins over `api_key`).
     pub api_key_env: String,
     /// Inline key (fallback when the env var is unset). Chmod 600 your
@@ -975,6 +1128,8 @@ impl Default for ZaiConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            accounts: Vec::new(),
+            show_default_account: true,
             api_key_env: "ZAI_API_KEY".to_string(),
             api_key: None,
             plan_tier: None,
@@ -988,7 +1143,7 @@ pub struct OpenRouterConfig {
     pub enabled: bool,
     /// Extra OpenRouter accounts beyond the default key. Each account gets a
     /// separate aggregate-view entry and cache directory.
-    pub accounts: Vec<OpenRouterAccount>,
+    pub accounts: Vec<ApiKeyAccount>,
     /// Whether aggregate views include the default (unnamed) key when named
     /// accounts exist. Ignored when `accounts` is empty so OpenRouter never
     /// loses its only tab.
@@ -1022,10 +1177,12 @@ impl Default for OpenRouterConfig {
     }
 }
 
-/// One named OpenRouter account. The default account continues to use the
-/// singular `api_key_env` / `api_key` fields under `[openrouter]`.
+/// One named API-key account — the shape every `[[<vendor>.accounts]]` array
+/// shares. OpenRouter shipped it first (#221); the other API-key vendors
+/// follow the same array. The default account continues to use the singular
+/// `api_key_env` / `api_key` fields under the vendor's own section.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct OpenRouterAccount {
+pub struct ApiKeyAccount {
     /// Stable CLI/report label and account-scoped cache subdirectory.
     pub label: String,
     /// Optional environment variable containing this account's key.
@@ -1036,49 +1193,41 @@ pub struct OpenRouterAccount {
     pub api_key: Option<String>,
 }
 
-impl OpenRouterConfig {
-    /// Find a named account or fail loudly instead of falling back to the
-    /// default key (which would show the wrong account's usage).
-    pub fn account(&self, label: &str) -> Result<&OpenRouterAccount> {
-        validate_account_label_for("openrouter", label)?;
-        self.accounts
-            .iter()
-            .find(|account| account.label == label)
-            .ok_or_else(|| {
-                let known: Vec<&str> = self
-                    .accounts
-                    .iter()
-                    .map(|account| account.label.as_str())
-                    .collect();
-                AppError::Credentials(format!(
-                    "openrouter account {label:?} not found in [[openrouter.accounts]]; \
-                     known labels: {known:?}"
-                ))
-            })
-    }
-
-    /// Resolve either the backward-compatible default key or one named
-    /// account. Configured values are never included in an error message.
-    pub fn resolve_api_key(&self, label: Option<&str>) -> Result<String> {
-        match label {
-            None => resolve_api_key("OpenRouter", &self.api_key_env, self.api_key.as_deref()),
-            Some(label) => {
-                let account = self.account(label)?;
-                resolve_api_key_in_section(
-                    &format!("OpenRouter account {label:?}"),
-                    "[[openrouter.accounts]]",
-                    account.api_key_env.as_deref().unwrap_or(""),
-                    account.api_key.as_deref(),
-                )
-            }
-        }
-    }
+/// The `[[<slug>.accounts]]` lookup behind every API-key vendor: find a named
+/// account or fail loudly instead of falling back to the default key (which
+/// would show the wrong account's usage).
+fn api_key_account<'a>(
+    slug: &str,
+    accounts: &'a [ApiKeyAccount],
+    label: &str,
+) -> Result<&'a ApiKeyAccount> {
+    validate_account_label_for(slug, label)?;
+    accounts
+        .iter()
+        .find(|account| account.label == label)
+        .ok_or_else(|| {
+            let known: Vec<&str> = accounts
+                .iter()
+                .map(|account| account.label.as_str())
+                .collect();
+            AppError::Credentials(format!(
+                "{slug} account {label:?} not found in [[{slug}.accounts]]; \
+                 known labels: {known:?}"
+            ))
+        })
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DeepseekConfig {
     pub enabled: bool,
+    /// Extra accounts beyond the default key (#221's array, generalized).
+    /// Each account gets a separate aggregate-view entry and cache directory.
+    pub accounts: Vec<ApiKeyAccount>,
+    /// Whether aggregate views include the default (unnamed) key when named
+    /// accounts exist. Ignored when `accounts` is empty so DeepSeek never
+    /// loses its only tab.
+    pub show_default_account: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
     /// Tank size in the currency `/user/balance` reports, so the remaining
@@ -1092,7 +1241,36 @@ impl Default for DeepseekConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            accounts: Vec::new(),
+            show_default_account: true,
             api_key_env: "DEEPSEEK_API_KEY".to_string(),
+            api_key: None,
+            display_limit: None,
+            headline: Headline::Amount,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DeepInfraConfig {
+    pub enabled: bool,
+    pub accounts: Vec<ApiKeyAccount>,
+    pub show_default_account: bool,
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+    /// Optional prepaid tank size in USD for rendering the balance as a meter.
+    pub display_limit: Option<f64>,
+    pub headline: Headline,
+}
+
+impl Default for DeepInfraConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            accounts: Vec::new(),
+            show_default_account: true,
+            api_key_env: "DEEPINFRA_API_KEY".to_string(),
             api_key: None,
             display_limit: None,
             headline: Headline::Amount,
@@ -1135,6 +1313,13 @@ impl Default for KimiConfig {
 #[serde(default)]
 pub struct KiloConfig {
     pub enabled: bool,
+    /// Extra accounts beyond the default key (#221's array, generalized).
+    /// Each account gets a separate aggregate-view entry and cache directory.
+    pub accounts: Vec<ApiKeyAccount>,
+    /// Whether aggregate views include the default (unnamed) key when named
+    /// accounts exist. Ignored when `accounts` is empty so Kilo never
+    /// loses its only tab.
+    pub show_default_account: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
     /// Optional Kilo organization id — scopes the balance to a team via the
@@ -1153,6 +1338,8 @@ impl Default for KiloConfig {
         // disabled and never affects existing installs.
         Self {
             enabled: false,
+            accounts: Vec::new(),
+            show_default_account: true,
             api_key_env: "KILO_API_KEY".to_string(),
             api_key: None,
             organization_id: None,
@@ -1166,6 +1353,13 @@ impl Default for KiloConfig {
 #[serde(default)]
 pub struct NovitaConfig {
     pub enabled: bool,
+    /// Extra accounts beyond the default key (#221's array, generalized).
+    /// Each account gets a separate aggregate-view entry and cache directory.
+    pub accounts: Vec<ApiKeyAccount>,
+    /// Whether aggregate views include the default (unnamed) key when named
+    /// accounts exist. Ignored when `accounts` is empty so Novita never
+    /// loses its only tab.
+    pub show_default_account: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
     /// Tank size in USD, so the available balance can be drawn as a meter.
@@ -1181,6 +1375,8 @@ impl Default for NovitaConfig {
         // Opt-in like DeepSeek/Kilo: needs an explicit API key.
         Self {
             enabled: false,
+            accounts: Vec::new(),
+            show_default_account: true,
             api_key_env: "NOVITA_API_KEY".to_string(),
             api_key: None,
             display_limit: None,
@@ -1193,6 +1389,13 @@ impl Default for NovitaConfig {
 #[serde(default)]
 pub struct MinimaxConfig {
     pub enabled: bool,
+    /// Extra accounts beyond the default key (#221's array, generalized).
+    /// Each account gets a separate aggregate-view entry and cache directory.
+    pub accounts: Vec<ApiKeyAccount>,
+    /// Whether aggregate views include the default (unnamed) key when named
+    /// accounts exist. Ignored when `accounts` is empty so MiniMax never
+    /// loses its only tab.
+    pub show_default_account: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
     /// `"global"` → api.minimax.io; `"cn"` → api.minimaxi.com. Unlike
@@ -1208,6 +1411,8 @@ impl Default for MinimaxConfig {
         // Opt-in like the other API-key vendors: needs an explicit key.
         Self {
             enabled: false,
+            accounts: Vec::new(),
+            show_default_account: true,
             api_key_env: "MINIMAX_API_KEY".to_string(),
             api_key: None,
             region: "global".to_string(),
@@ -1219,6 +1424,13 @@ impl Default for MinimaxConfig {
 #[serde(default)]
 pub struct MoonshotConfig {
     pub enabled: bool,
+    /// Extra accounts beyond the default key (#221's array, generalized).
+    /// Each account gets a separate aggregate-view entry and cache directory.
+    pub accounts: Vec<ApiKeyAccount>,
+    /// Whether aggregate views include the default (unnamed) key when named
+    /// accounts exist. Ignored when `accounts` is empty so Moonshot never
+    /// loses its only tab.
+    pub show_default_account: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
     /// `"global"` → api.moonshot.ai (USD); `"cn"` → api.moonshot.cn (CNY).
@@ -1235,6 +1447,8 @@ impl Default for MoonshotConfig {
         // Opt-in like DeepSeek/Kilo/Novita: needs an explicit API key.
         Self {
             enabled: false,
+            accounts: Vec::new(),
+            show_default_account: true,
             api_key_env: "MOONSHOT_API_KEY".to_string(),
             api_key: None,
             region: "global".to_string(),
@@ -1248,6 +1462,13 @@ impl Default for MoonshotConfig {
 #[serde(default)]
 pub struct GrokConfig {
     pub enabled: bool,
+    /// Extra accounts beyond the default key (#221's array, generalized).
+    /// Each account gets a separate aggregate-view entry and cache directory.
+    pub accounts: Vec<ApiKeyAccount>,
+    /// Whether aggregate views include the default (unnamed) key when named
+    /// accounts exist. Ignored when `accounts` is empty so Grok never
+    /// loses its only tab.
+    pub show_default_account: bool,
     /// Env var for the xAI **Management** key (distinct from the inference key).
     pub api_key_env: String,
     pub api_key: Option<String>,
@@ -1265,6 +1486,8 @@ impl Default for GrokConfig {
         // Opt-in: needs a management key (and, for prepaid, a team).
         Self {
             enabled: false,
+            accounts: Vec::new(),
+            show_default_account: true,
             api_key_env: "XAI_MANAGEMENT_KEY".to_string(),
             api_key: None,
             team_id: None,
@@ -1876,6 +2099,7 @@ impl Config {
             self.zai.api_key.as_deref(),
             self.openrouter.api_key.as_deref(),
             self.deepseek.api_key.as_deref(),
+            self.deepinfra.api_key.as_deref(),
             self.kimi.api_key.as_deref(),
             self.kilo.api_key.as_deref(),
             self.novita.api_key.as_deref(),
@@ -1889,9 +2113,9 @@ impl Config {
         ]
         .into_iter()
         .chain(
-            self.openrouter
-                .accounts
-                .iter()
+            Self::API_KEY_ACCOUNT_VENDORS
+                .into_iter()
+                .flat_map(|id| self.api_key_accounts(id).unwrap_or(&[]))
                 .map(|account| account.api_key.as_deref()),
         )
         .chain(self.custom.iter().map(|c| c.api_key.as_deref()))
@@ -1948,6 +2172,7 @@ impl Config {
             VendorId::Zai => self.zai.enabled,
             VendorId::Openrouter => self.openrouter.enabled,
             VendorId::Deepseek => self.deepseek.enabled,
+            VendorId::Deepinfra => self.deepinfra.enabled,
             VendorId::Kimi => self.kimi.enabled,
             VendorId::Kilo => self.kilo.enabled,
             VendorId::Novita => self.novita.enabled,
@@ -1980,6 +2205,7 @@ impl Config {
             VendorId::Zai => &self.zai.api_key_env,
             VendorId::Openrouter => &self.openrouter.api_key_env,
             VendorId::Deepseek => &self.deepseek.api_key_env,
+            VendorId::Deepinfra => &self.deepinfra.api_key_env,
             VendorId::Kimi => &self.kimi.api_key_env,
             VendorId::Kilo => &self.kilo.api_key_env,
             VendorId::Novita => &self.novita.api_key_env,
@@ -2014,6 +2240,7 @@ impl Config {
             VendorId::Zai => self.zai.api_key.as_deref(),
             VendorId::Openrouter => self.openrouter.api_key.as_deref(),
             VendorId::Deepseek => self.deepseek.api_key.as_deref(),
+            VendorId::Deepinfra => self.deepinfra.api_key.as_deref(),
             VendorId::Kimi => self.kimi.api_key.as_deref(),
             VendorId::Kilo => self.kilo.api_key.as_deref(),
             VendorId::Novita => self.novita.api_key.as_deref(),
@@ -2038,6 +2265,84 @@ impl Config {
         raw.filter(|key| !key.is_empty())
     }
 
+    /// The API-key vendors that take a `[[<vendor>.accounts]]` array —
+    /// OpenRouter's (#221), generalized. Kimi is left out on purpose: its
+    /// fallback is the Kimi Code CLI's single OAuth login, not a key.
+    pub const API_KEY_ACCOUNT_VENDORS: [VendorId; 10] = [
+        VendorId::Zai,
+        VendorId::Openrouter,
+        VendorId::Deepseek,
+        VendorId::Deepinfra,
+        VendorId::Kilo,
+        VendorId::Novita,
+        VendorId::Moonshot,
+        VendorId::Grok,
+        VendorId::Minimax,
+        VendorId::OrcaRouter,
+    ];
+
+    /// The named `[[<vendor>.accounts]]` array, or `None` for a vendor that
+    /// has no such array (see [`Self::API_KEY_ACCOUNT_VENDORS`]).
+    pub fn api_key_accounts(&self, id: VendorId) -> Option<&[ApiKeyAccount]> {
+        match id {
+            VendorId::Zai => Some(&self.zai.accounts),
+            VendorId::Openrouter => Some(&self.openrouter.accounts),
+            VendorId::Deepseek => Some(&self.deepseek.accounts),
+            VendorId::Deepinfra => Some(&self.deepinfra.accounts),
+            VendorId::Kilo => Some(&self.kilo.accounts),
+            VendorId::Novita => Some(&self.novita.accounts),
+            VendorId::Moonshot => Some(&self.moonshot.accounts),
+            VendorId::Grok => Some(&self.grok.accounts),
+            VendorId::Minimax => Some(&self.minimax.accounts),
+            VendorId::OrcaRouter => Some(&self.orcarouter.accounts),
+            _ => None,
+        }
+    }
+
+    /// Whether the default key keeps its tab next to the named accounts.
+    /// `true` for every vendor without an accounts array.
+    pub fn show_default_api_key_account(&self, id: VendorId) -> bool {
+        match id {
+            VendorId::Zai => self.zai.show_default_account,
+            VendorId::Openrouter => self.openrouter.show_default_account,
+            VendorId::Deepseek => self.deepseek.show_default_account,
+            VendorId::Deepinfra => self.deepinfra.show_default_account,
+            VendorId::Kilo => self.kilo.show_default_account,
+            VendorId::Novita => self.novita.show_default_account,
+            VendorId::Moonshot => self.moonshot.show_default_account,
+            VendorId::Grok => self.grok.show_default_account,
+            VendorId::Minimax => self.minimax.show_default_account,
+            VendorId::OrcaRouter => self.orcarouter.show_default_account,
+            _ => true,
+        }
+    }
+
+    /// The default key, or one named `[[<vendor>.accounts]]` key, for a vendor
+    /// in [`Self::API_KEY_ACCOUNT_VENDORS`]. The default path is exactly the
+    /// single-key resolution each vendor always had, error text included. A
+    /// label for a vendor without the array fails loudly rather than falling
+    /// back to the default key, which would show the wrong account's usage.
+    pub fn resolve_account_api_key_for(&self, id: VendorId, label: Option<&str>) -> Result<String> {
+        // The missing-key error predates `display_name()`; Z.AI's always said
+        // "Zai", and its section is derived from this spelling.
+        let name = match id {
+            VendorId::Zai => "Zai",
+            other => other.display_name(),
+        };
+        let Some(label) = label else {
+            return resolve_api_key(name, self.api_key_env_for(id), self.inline_api_key(id));
+        };
+        let slug = id.config_section();
+        let account = api_key_account(slug, self.api_key_accounts(id).unwrap_or(&[]), label)?;
+        // Names the account and its array section; never a configured value.
+        resolve_api_key_in_section(
+            &format!("{name} account {label:?}"),
+            &format!("[[{slug}.accounts]]"),
+            account.api_key_env.as_deref().unwrap_or(""),
+            account.api_key.as_deref(),
+        )
+    }
+
     /// Bar-number settings for one vendor.
     ///
     /// Only the prepaid-balance vendors declare these; everything else keeps
@@ -2046,6 +2351,9 @@ impl Config {
         match vendor {
             VendorId::Deepseek => {
                 DisplayPrefs::balance(self.deepseek.display_limit, self.deepseek.headline)
+            }
+            VendorId::Deepinfra => {
+                DisplayPrefs::balance(self.deepinfra.display_limit, self.deepinfra.headline)
             }
             VendorId::Kilo => DisplayPrefs::balance(self.kilo.display_limit, self.kilo.headline),
             VendorId::Novita => {
@@ -2118,6 +2426,7 @@ impl Config {
         // asked for — or none, with no diagnostic either way.
         for (section, limit) in [
             ("deepseek", self.deepseek.display_limit),
+            ("deepinfra", self.deepinfra.display_limit),
             ("kilo", self.kilo.display_limit),
             ("novita", self.novita.display_limit),
             ("moonshot", self.moonshot.display_limit),
@@ -2173,28 +2482,34 @@ impl Config {
                 )));
             }
         }
-        let mut openrouter_labels = HashSet::new();
-        for account in &self.openrouter.accounts {
-            validate_account_label_for("openrouter", &account.label)?;
-            if !openrouter_labels.insert(&account.label) {
-                return Err(AppError::Credentials(format!(
-                    "duplicate openrouter account label {:?}",
-                    account.label
-                )));
-            }
-            let has_env = account
-                .api_key_env
-                .as_deref()
-                .is_some_and(|name| !name.is_empty());
-            let has_inline = account
-                .api_key
-                .as_deref()
-                .is_some_and(|key| !key.is_empty());
-            if !has_env && !has_inline {
-                return Err(AppError::Credentials(format!(
-                    "openrouter account {:?} must set api_key_env or api_key",
-                    account.label
-                )));
+        // Every `[[<vendor>.accounts]]` array follows OpenRouter's rules: labels
+        // become cache subdirectories, stay unique as CLI selectors and tab
+        // identities, and each entry names a key source.
+        for id in Self::API_KEY_ACCOUNT_VENDORS {
+            let slug = id.config_section();
+            let mut labels = HashSet::new();
+            for account in self.api_key_accounts(id).unwrap_or(&[]) {
+                validate_account_label_for(slug, &account.label)?;
+                if !labels.insert(&account.label) {
+                    return Err(AppError::Credentials(format!(
+                        "duplicate {slug} account label {:?}",
+                        account.label
+                    )));
+                }
+                let has_env = account
+                    .api_key_env
+                    .as_deref()
+                    .is_some_and(|name| !name.is_empty());
+                let has_inline = account
+                    .api_key
+                    .as_deref()
+                    .is_some_and(|key| !key.is_empty());
+                if !has_env && !has_inline {
+                    return Err(AppError::Credentials(format!(
+                        "{slug} account {:?} must set api_key_env or api_key",
+                        account.label
+                    )));
+                }
             }
         }
         self.validate_custom()
@@ -2467,14 +2782,73 @@ mod tests {
         assert!(err.contains("[[openai.accounts]]"), "{err}");
     }
 
+    fn two_codex_accounts() -> OpenAiConfig {
+        OpenAiConfig {
+            codex_auth_path: Some(PathBuf::from("/tmp/codex/auth.json")),
+            accounts: vec![
+                OpenAiAccount {
+                    label: "main".into(),
+                    codex_auth_path: PathBuf::from("/tmp/codex-main/auth.json"),
+                },
+                OpenAiAccount {
+                    label: "work".into(),
+                    codex_auth_path: PathBuf::from("/tmp/codex-work/auth.json"),
+                },
+            ],
+            ..OpenAiConfig::default()
+        }
+    }
+
     #[test]
-    fn defaults_enable_only_the_five_core_vendors() {
+    fn the_active_codex_account_is_read_from_the_default_slot() {
+        let config = two_codex_accounts();
+        assert_eq!(
+            config
+                .fetch_auth_path_probing("work", Some("work"), |_| false)
+                .unwrap(),
+            PathBuf::from("/tmp/codex/auth.json")
+        );
+        assert_eq!(
+            config
+                .fetch_auth_path_probing("main", Some("work"), |_| false)
+                .unwrap(),
+            PathBuf::from("/tmp/codex-main/auth.json")
+        );
+    }
+
+    #[test]
+    fn an_active_codex_account_with_its_own_file_keeps_reading_it() {
+        let config = two_codex_accounts();
+        assert_eq!(
+            config
+                .fetch_auth_path_probing("work", Some("work"), |_| true)
+                .unwrap(),
+            PathBuf::from("/tmp/codex-work/auth.json")
+        );
+    }
+
+    #[test]
+    fn adding_an_openai_account_keeps_the_rest_of_the_file() {
+        let mut doc: toml_edit::DocumentMut = "# mine\n[zai]\nenabled = true\n".parse().unwrap();
+        add_openai_account_to_doc(&mut doc, "work", "~/.codex-work/auth.json").unwrap();
+        let text = doc.to_string();
+        assert!(
+            text.starts_with("# mine\n[zai]\nenabled = true\n"),
+            "{text}"
+        );
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.openai.accounts[0].label, "work");
+        assert!(add_openai_account_to_doc(&mut doc, "work", "x").is_err());
+        assert!(add_openai_account_to_doc(&mut doc, "../x", "x").is_err());
+    }
+
+    #[test]
+    fn defaults_enable_only_the_four_core_vendors() {
         let c = Config::default();
         assert!(c.is_enabled(VendorId::Anthropic));
         assert!(c.is_enabled(VendorId::Openai));
         assert!(c.is_enabled(VendorId::Zai));
         assert!(c.is_enabled(VendorId::Openrouter));
-        assert!(c.is_enabled(VendorId::CommandCode));
         for opt_in in [
             VendorId::AnthropicApi,
             VendorId::Copilot,
@@ -2489,12 +2863,25 @@ mod tests {
             VendorId::Cursor,
             VendorId::Minimax,
             VendorId::Kiro,
+            VendorId::CommandCode,
             VendorId::OrcaRouter,
             VendorId::ModelStudio,
         ] {
             assert!(!c.is_enabled(opt_in), "{opt_in:?}");
         }
-        assert_eq!(c.enabled_vendors().len(), 5);
+        assert_eq!(c.enabled_vendors().len(), 4);
+    }
+
+    #[test]
+    fn commandcode_is_opt_in_when_loading_existing_configs() {
+        let absent: Config = toml::from_str("[openai]\nenabled = true\n").unwrap();
+        assert!(!absent.is_enabled(VendorId::CommandCode));
+
+        let opted_in: Config = toml::from_str("[commandcode]\nenabled = true\n").unwrap();
+        assert!(opted_in.is_enabled(VendorId::CommandCode));
+
+        let opted_out: Config = toml::from_str("[commandcode]\nenabled = false\n").unwrap();
+        assert!(!opted_out.is_enabled(VendorId::CommandCode));
     }
 
     #[test]
@@ -2558,12 +2945,25 @@ enabled = true
     #[test]
     fn openrouter_named_inline_keys_receive_config_file_protection() {
         let mut config = Config::default();
-        config.openrouter.accounts.push(OpenRouterAccount {
+        config.openrouter.accounts.push(ApiKeyAccount {
             label: "work".into(),
             api_key_env: None,
             api_key: Some("<redacted>".into()),
         });
         assert!(config.has_inline_secrets());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_named_inline_api_key_receives_config_file_protection() {
+        for vendor in Config::API_KEY_ACCOUNT_VENDORS {
+            let section = vendor.config_section();
+            let config: Config = toml::from_str(&format!(
+                "[[{section}.accounts]]\nlabel = \"work\"\napi_key = \"<redacted>\"\n"
+            ))
+            .unwrap();
+            assert!(config.has_inline_secrets(), "{vendor:?}");
+        }
     }
 
     #[test]
@@ -3358,11 +3758,15 @@ enabled = false
         assert!(!config.openrouter.show_default_account);
         assert_eq!(config.openrouter.accounts.len(), 2);
         assert_eq!(
-            config.openrouter.resolve_api_key(None).unwrap(),
+            config
+                .resolve_account_api_key_for(VendorId::Openrouter, None)
+                .unwrap(),
             "default-inline"
         );
         assert_eq!(
-            config.openrouter.resolve_api_key(Some("personal")).unwrap(),
+            config
+                .resolve_account_api_key_for(VendorId::Openrouter, Some("personal"))
+                .unwrap(),
             "personal-inline"
         );
     }
@@ -3395,17 +3799,15 @@ enabled = false
 
     #[test]
     fn openrouter_unknown_account_never_falls_back_to_default_key() {
-        let mut config = OpenRouterConfig {
-            api_key: Some("default-secret".into()),
-            ..OpenRouterConfig::default()
-        };
-        config.accounts.push(OpenRouterAccount {
+        let mut config = Config::default();
+        config.openrouter.api_key = Some("default-secret".into());
+        config.openrouter.accounts.push(ApiKeyAccount {
             label: "work".into(),
             api_key_env: None,
             api_key: Some("work-secret".into()),
         });
         let message = config
-            .resolve_api_key(Some("missing"))
+            .resolve_account_api_key_for(VendorId::Openrouter, Some("missing"))
             .unwrap_err()
             .to_string();
         assert!(message.contains("missing") && message.contains("work"));
@@ -3415,22 +3817,121 @@ enabled = false
 
     #[test]
     fn openrouter_account_key_errors_do_not_echo_configured_values() {
-        let config = OpenRouterConfig {
-            accounts: vec![OpenRouterAccount {
-                label: "work".into(),
-                api_key_env: Some("sk_pasted_secret".into()),
-                api_key: None,
-            }],
-            ..OpenRouterConfig::default()
-        };
+        let mut config = Config::default();
+        config.openrouter.accounts.push(ApiKeyAccount {
+            label: "work".into(),
+            api_key_env: Some("sk_pasted_secret".into()),
+            api_key: None,
+        });
         let _g = env_guard();
         unsafe { std::env::remove_var("sk_pasted_secret") };
         let message = config
-            .resolve_api_key(Some("work"))
+            .resolve_account_api_key_for(VendorId::Openrouter, Some("work"))
             .unwrap_err()
             .to_string();
         assert!(message.contains("[[openrouter.accounts]]"));
         assert!(!message.contains("sk_pasted_secret"));
+    }
+
+    #[test]
+    fn every_api_key_account_vendor_validates_its_array_like_openrouter() {
+        for vendor in Config::API_KEY_ACCOUNT_VENDORS {
+            let section = vendor.config_section();
+            let parse = |accounts: &str| -> Result<Config> {
+                let config: Config =
+                    toml::from_str(&format!("[{section}]\nenabled = true\n{accounts}")).unwrap();
+                config.validate().map(|()| config)
+            };
+            let config = parse(&format!(
+                "[[{section}.accounts]]\nlabel = \"work\"\napi_key = \"k\"\n"
+            ))
+            .unwrap();
+            assert_eq!(
+                config.api_key_accounts(vendor).unwrap().len(),
+                1,
+                "{vendor:?}"
+            );
+            assert!(config.show_default_api_key_account(vendor), "{vendor:?}");
+
+            let duplicate = parse(&format!(
+                "[[{section}.accounts]]\nlabel = \"work\"\napi_key = \"a\"\n\
+                 [[{section}.accounts]]\nlabel = \"work\"\napi_key = \"b\"\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(
+                duplicate.contains(&format!("duplicate {section} account label")),
+                "{duplicate}"
+            );
+
+            let keyless = parse(&format!("[[{section}.accounts]]\nlabel = \"work\"\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                keyless.contains("must set api_key_env or api_key"),
+                "{keyless}"
+            );
+
+            // A label becomes a cache subdirectory, so a path is refused.
+            assert!(
+                parse(&format!(
+                    "[[{section}.accounts]]\nlabel = \"../x\"\napi_key = \"k\"\n"
+                ))
+                .is_err(),
+                "{vendor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_api_key_accounts_resolve_their_own_key_and_never_the_default() {
+        let mut config = Config::default();
+        config.deepseek.api_key_env.clear();
+        config.deepseek.api_key = Some("default-key".into());
+        config.deepseek.accounts.push(ApiKeyAccount {
+            label: "work".into(),
+            api_key_env: Some("AI_USAGEBAR_TEST_DEEPSEEK_WORK".into()),
+            api_key: Some("work-inline".into()),
+        });
+        let _g = env_guard();
+        unsafe { std::env::set_var("AI_USAGEBAR_TEST_DEEPSEEK_WORK", "work-env") };
+        let resolve = |label| config.resolve_account_api_key_for(VendorId::Deepseek, label);
+        assert_eq!(resolve(None).unwrap(), "default-key");
+        assert_eq!(resolve(Some("work")).unwrap(), "work-env", "env wins");
+        unsafe { std::env::remove_var("AI_USAGEBAR_TEST_DEEPSEEK_WORK") };
+        assert_eq!(resolve(Some("work")).unwrap(), "work-inline");
+
+        let unknown = resolve(Some("typo")).unwrap_err().to_string();
+        assert!(unknown.contains("[[deepseek.accounts]]"), "{unknown}");
+        assert!(
+            unknown.contains("\"work\""),
+            "lists known labels: {unknown}"
+        );
+        assert!(!unknown.contains("default-key"), "{unknown}");
+    }
+
+    #[test]
+    fn the_default_key_error_keeps_each_vendors_historic_wording() {
+        let mut config = Config::default();
+        config.zai.api_key_env.clear();
+        config.minimax.api_key_env.clear();
+        let zai = config
+            .resolve_account_api_key_for(VendorId::Zai, None)
+            .unwrap_err()
+            .to_string();
+        let expected = resolve_api_key("Zai", "", None).unwrap_err().to_string();
+        assert_eq!(zai, expected);
+        assert!(zai.contains("[zai]"), "{zai}");
+        let minimax = config
+            .resolve_account_api_key_for(VendorId::Minimax, None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            minimax,
+            resolve_api_key("MiniMax", "", None)
+                .unwrap_err()
+                .to_string()
+        );
     }
 
     #[test]
@@ -3445,7 +3946,6 @@ enabled = false
                 VendorId::Openai,
                 VendorId::Zai,
                 VendorId::Openrouter,
-                VendorId::CommandCode,
             ]
         );
     }
@@ -3612,7 +4112,6 @@ enabled = false
                 VendorId::Openrouter,
                 VendorId::Deepseek,
                 VendorId::Kimi,
-                VendorId::CommandCode,
             ]
         );
     }
@@ -4713,6 +5212,15 @@ enabled = true
     }
 
     #[test]
+    fn tray_ignores_removed_menu_bar_keys_for_back_compatibility() {
+        let legacy = write_toml(
+            "[tray]\nmenu_bar_show_all = false\nmenu_bar_hide_value = true\nmenu_bar_names = \"short\"\nmenu_bar_provider = \"anthropic\"\nmenu_bar_window = \"weekly\"\n",
+        );
+        let config = Config::load_from(legacy.path()).unwrap();
+        assert_eq!(config.tray, TrayConfig::default());
+    }
+
+    #[test]
     fn tray_section_rejects_a_misspelled_mode() {
         let file = write_toml("[tray]\nupdates = \"sometimes\"\n");
         assert!(Config::load_from(file.path()).is_err());
@@ -4767,6 +5275,94 @@ enabled = true
             let config = Config::load_from(file.path()).unwrap();
             assert_eq!(config.notifications.threshold.to_string(), threshold);
         }
+    }
+
+    #[test]
+    fn notification_preferences_round_trip_without_changing_other_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# keep this\n[tray]\nrefresh_minutes = 10\n").unwrap();
+        set_notification_value(&path, "enabled", false.into()).unwrap();
+        set_notification_value(&path, "threshold", 85i64.into()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep this\n[tray]\nrefresh_minutes = 10"));
+        let config = Config::load_from(&path).unwrap();
+        assert!(!config.notifications.enabled);
+        assert_eq!(config.notifications.threshold, 85);
+        assert!(set_notification_value(&path, "threshold", 101i64.into()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    /// #244's whitelist: a real slug round-trips onto that vendor's `enabled`
+    /// switch (creating the section when the config never had one) while the
+    /// rest of the file is untouched, and a slug that names no built-in vendor
+    /// is refused without writing anything.
+    #[test]
+    fn vendor_enabled_round_trips_and_rejects_unknown_slugs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# keep\n[zai]\nenabled = true # mine\n").unwrap();
+
+        set_vendor_enabled(&path, "zai", false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# keep\n"), "{text}");
+        assert!(text.contains("enabled = false # mine"), "{text}");
+        assert!(!config_enabled(&path, VendorId::Zai));
+
+        set_vendor_enabled(&path, "grok", true).unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert!(config.is_enabled(VendorId::Grok));
+        assert!(
+            !config.is_enabled(VendorId::Deepseek),
+            "only the named vendor moves; untouched opt-in vendors stay off"
+        );
+        assert!(
+            config.is_enabled(VendorId::Openai),
+            "an untouched default-on vendor is not switched off either"
+        );
+
+        for bad in ["", "custom", "not-a-vendor", "anthropic "] {
+            let error = set_vendor_enabled(&path, bad, true)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("unknown provider"), "{bad}: {error}");
+        }
+        // A refused write leaves the file byte-for-byte alone.
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("enabled = false # mine")
+        );
+    }
+
+    /// The doc-level core only ever lands on the vendor's own section, and an
+    /// idempotent call does not rewrite the file.
+    #[test]
+    fn set_vendor_enabled_in_doc_targets_the_section_and_stays_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[grok]\nenabled = true\napi_key = \"k\"\n").unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        set_vendor_enabled(&path, "grok", true).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[grok]\nenabled = true\napi_key = \"k\"\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+
+        let mut doc = toml_edit::DocumentMut::new();
+        set_vendor_enabled_in_doc(&mut doc, "opencode-go", true).unwrap();
+        assert_eq!(doc.to_string(), "[opencode-go]\nenabled = true\n");
+        assert!(set_vendor_enabled_in_doc(&mut doc, "mytool", true).is_err());
+    }
+
+    fn config_enabled(path: &std::path::Path, vendor: VendorId) -> bool {
+        Config::load_from(path).unwrap().is_enabled(vendor)
     }
 
     #[test]

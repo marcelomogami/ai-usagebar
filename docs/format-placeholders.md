@@ -12,6 +12,7 @@ metrics expand to an empty string unless noted otherwise.
 | Claude | `cld` | Codex | `gpt` |
 | GitHub Copilot | `ghc` | Z.AI | `zai` |
 | OpenRouter | `opr` | DeepSeek | `dsk` |
+| DeepInfra | `dif` | | |
 | Kimi | `kmi` | Kilo | `klo` |
 | Novita | `nvt` | Moonshot | `msh` |
 | Grok | `grk` | SuperGrok | `sgk` |
@@ -53,9 +54,19 @@ These are compatible with claudebar.
 | `{sonnet_*}` | The same family for the seven-day Sonnet window. Empty when absent. |
 | `{scoped_model}`, `{scoped_pct}`, `{scoped_reset}`, `{scoped_elapsed}`, `{scoped_bar}` | `Fable`, `84`, `5d 2h`, `27`, `█████████████████░░░` |
 | `{extra_spent}`, `{extra_limit}`, `{extra_pct}`, `{extra_bar}` | `$2.50`, `$50.00`, `5`, `█░░░░░░░░░░░░░░░░░░░` |
+| `{resets_available}`, `{resets}` | `1`, `1 reset available` |
 
 The scoped family describes the first model-specific weekly window. When that
 window is absent, it returns neutral empty, `0`, or `—` values as appropriate.
+
+`{resets_available}` is the number of banked limit resets Claude is offering —
+the ones the app shows under "Resets", which you redeem by hand rather than
+waiting for `{session_reset}`. `{resets}` is the compact count (`1 reset
+available`); it reads `0 resets available` when there is no grant, so gate the
+row on `{resets_available}` if you only want it when there is one. The
+per-grant labels and expiry dates appear in the default tooltip and in the TUI
+panel. Claude only offers these during a campaign, and only to accounts it
+selects — most of the time both are `0`.
 
 ## Codex
 
@@ -182,6 +193,16 @@ down to the key's `access_until`, or `—` when it has no expiry.
 
 These report the `/user/balance` credit balance. USD is preferred when both
 currencies are present; otherwise they use CNY.
+
+## DeepInfra
+
+`{dif_balance}`, `{dif_used_month}`, `{dif_limit}`, `{dif_period}`,
+`{dif_consumed_pct}`
+
+`{dif_balance}` is the general prepaid balance after recent uninvoiced usage.
+`{dif_used_month}` converts `/payment/usage`'s cent-denominated `total_cost` to
+US dollars. `{dif_limit}` is the monthly spending limit or `no limit`, and
+`{dif_consumed_pct}` renders `—` when the account has no monthly limit.
 
 ## Kimi
 
