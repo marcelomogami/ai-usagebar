@@ -17,8 +17,8 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import {barMarkup, colorForPct, disambiguateTags, field, FIELD, FORMAT, hasUsageWindows, integer,
-    isGrouped, MARKER, markerElapsed, plainTextFromPango, selectPools,
+import {barMarkup, colorForDelta, colorForPct, disambiguateTags, field, FIELD, FORMAT, hasUsageWindows, integer,
+    isGrouped, MARKER, markerElapsed, paceGlyph, plainTextFromPango, selectPools,
     splitFormatOutput} from './marker-logic.js';
 import {commandFailure, errorLine, parseReport, summarize} from './report-model.js';
 
@@ -117,11 +117,12 @@ function resolveBinary(settings) {
 
 const Indicator = GObject.registerClass(
 class AiUsageBarIndicator extends PanelMenu.Button {
-    _init(settings, openPrefs, iconDir) {
+    _init(settings, openPrefs, iconDir, vendor) {
         super._init(0.0, 'AI Usage Bar', false);
 
         this._settings = settings;
         this._openPrefs = openPrefs;
+        this._vendor = vendor;
         this._iconDir = iconDir;
         this._marks = new Map();
         this._data = null;          // parsed snapshot for redraws
@@ -135,19 +136,36 @@ class AiUsageBarIndicator extends PanelMenu.Button {
         this._panelJob = newJob();
         this._reportJob = newJob();
 
-        // Panel: one markup label holds tags + percentages + bars.
+        // Panel: one markup label holds tags + percentages + bars. The icon
+        // stands in when the settings leave nothing for the label to draw,
+        // so the indicator never collapses into an empty click target.
         this._label = new St.Label({
             text: '5h …',
             y_align: Clutter.ActorAlign.CENTER,
             style_class: 'aiub-label',
         });
-        this.add_child(this._label);
+        this._icon = new St.Icon({
+            style_class: 'system-status-icon',
+            y_align: Clutter.ActorAlign.CENTER,
+            visible: false,
+        });
+        const panelBox = new St.BoxLayout({style_class: 'panel-status-menu-box'});
+        // With several indicators side by side, the brand mark ahead of the
+        // bars tells them apart.
+        const mark = this._markIcon(vendor);
+        if (mark) {
+            panelBox.add_child(new St.Icon({gicon: mark, style_class: 'system-status-icon',
+                y_align: Clutter.ActorAlign.CENTER}));
+        }
+        panelBox.add_child(this._icon);
+        panelBox.add_child(this._label);
+        this.add_child(panelBox);
 
         this._buildMenu();
 
         // Re-render cached data when any display setting changes (no refetch).
         const viewKeys = [
-            'bar-width', 'show-percent', 'show-bars', 'show-session',
+            'bar-width', 'show-percent', 'show-bars', 'show-pace', 'show-session',
             'show-weekly', 'show-extra', 'color-low', 'color-mid',
             'color-high', 'color-critical', 'color-empty',
             'panel-pools', 'panel-auto-threshold',
@@ -159,7 +177,6 @@ class AiUsageBarIndicator extends PanelMenu.Button {
         this._intervalId = this._settings.connect('changed::refresh-interval',
             () => this._restartTimer());
         this._sourceIds = [
-            this._settings.connect('changed::vendor', () => this._refresh()),
             this._settings.connect('changed::binary-path', () => {
                 this._refresh();
                 this._refreshReport();
@@ -487,25 +504,15 @@ class AiUsageBarIndicator extends PanelMenu.Button {
     }
 
     _refresh() {
-        // Dropping the request while busy meant a vendor change *during* a
-        // fetch never started one for the new vendor: the in-flight result for
-        // the OLD vendor was applied and stayed on the panel until the next
-        // timer tick. `_run` remembers that a refresh was asked for and runs
-        // it as soon as the current one settles.
-        //
-        // Captured for THIS attempt: the setting can change while we wait, and
-        // a late result must not be rendered as if it belonged to the vendor
-        // now selected.
-        const vendor = this._settings.get_string('vendor') || 'anthropic';
-        const argv = [resolveBinary(this._settings), '--vendor', vendor, '--format', FORMAT];
+        // The vendor is fixed per indicator; a change to the `vendor` setting
+        // rebuilds the indicators instead (AiUsageBarExtension._place).
+        // `_run` remembers a refresh asked for while busy and runs it as soon
+        // as the current one settles.
+        const argv = [resolveBinary(this._settings), '--vendor', this._vendor, '--format', FORMAT];
         this._run(this._panelJob, argv, {
             again: () => this._refresh(),
             failed: (short, detail) => this._setError(short, detail),
             done: (out, err, ok) => {
-                // The selection may have changed while this ran even without a
-                // newer attempt (the change is queued as `pending`).
-                if ((this._settings.get_string('vendor') || 'anthropic') !== vendor)
-                    return;
                 if (!out.trim() && !ok) {
                     this._setError('ai-usagebar failed', err);
                     return;
@@ -550,7 +557,7 @@ class AiUsageBarIndicator extends PanelMenu.Button {
         if (f.length <= FIELD.extraLimit) {
             // Loading… / ⚠ — show the binary's own text.
             this._data = null;
-            this._label.clutter_text.set_markup(`<span foreground="${FG}">${esc(raw) || '…'}</span>`);
+            this._setPanelMarkup(`<span foreground="${FG}">${esc(raw) || '…'}</span>`);
             return;
         }
         // Only what the top bar draws. The click menu reads `usage --json`.
@@ -599,15 +606,20 @@ class AiUsageBarIndicator extends PanelMenu.Button {
         const w = Math.max(4, Math.min(20, this._settings.get_int('bar-width')));
         const showPct = this._settings.get_boolean('show-percent');
         const showBars = this._settings.get_boolean('show-bars');
+        const showPace = !showBars && this._settings.get_boolean('show-pace');
 
         const seg = (tag, pct, valueText, elapsed) => {
+            // Pace mode: without bars there is no pace marker, so the value
+            // carries the pace instead, colored by usage minus elapsed, with
+            // its arrow.
+            const paced = showPace && Number.isFinite(elapsed);
+            const color = paced ? colorForDelta(pct - elapsed, colors) : colorForPct(pct, colors);
+            const text = paced ? `${valueText}${paceGlyph(pct - elapsed)}` : valueText;
             const toks = [`<span foreground="${DIM}">${tag}</span>`];
-            if (showPct)
-                toks.push(`<span foreground="${colorForPct(pct, colors)}">${esc(valueText)}</span>`);
+            if (showPct || !showBars) // never render an empty segment
+                toks.push(`<span foreground="${color}">${esc(text)}</span>`);
             if (showBars)
                 toks.push(barMarkup(pct, w, colors, elapsed));
-            if (!showPct && !showBars) // never render an empty segment
-                toks.push(`<span foreground="${colorForPct(pct, colors)}">${esc(valueText)}</span>`);
             return toks.join(' ');
         };
 
@@ -640,7 +652,23 @@ class AiUsageBarIndicator extends PanelMenu.Button {
         }
 
         const gap = `<span foreground="${DIM}">   </span>`;
-        this._label.clutter_text.set_markup(parts.join(gap) || ' ');
+        this._setPanelMarkup(parts.join(gap));
+    }
+
+    // Every top-bar write goes through here. Empty markup, e.g. both windows
+    // switched off, hides the label; what stays visible is decided below.
+    _setPanelMarkup(markup) {
+        const empty = !markup;
+        // The brand mark is already prepended in _init, so assigning it to
+        // _icon as well would draw the same mark twice. The icon slot is the
+        // stand-in — keeping the indicator from collapsing — only when the
+        // vendor has no mark file, falling back to the generic icon.
+        const standIn = empty && !this._markIcon(this._vendor);
+        if (standIn)
+            this._icon.icon_name = 'application-x-executable-symbolic';
+        this._icon.visible = standIn;
+        this._label.visible = !empty;
+        this._label.clutter_text.set_markup(markup);
     }
 
     // The pools the panel should draw, tagged and in display order. Primary is
@@ -668,7 +696,7 @@ class AiUsageBarIndicator extends PanelMenu.Button {
     _setError(short, detail) {
         this._data = null;
         // The top bar stays a compact ⚠; the reason is the menu's first line.
-        this._label.clutter_text.set_markup(`<span foreground="${RED}">⚠ ai</span>`);
+        this._setPanelMarkup(`<span foreground="${RED}">⚠ ai</span>`);
         this._panelError = errorLine(short, detail);
         this._paintReport(this._report);
     }
@@ -717,35 +745,50 @@ class AiUsageBarIndicator extends PanelMenu.Button {
 export default class AiUsageBarExtension extends Extension {
     enable() {
         this._settings = this.getSettings();
+        this._indicators = [];
         this._place();
         this._placeIds = [
             this._settings.connect('changed::panel-box', () => this._place()),
             this._settings.connect('changed::panel-index', () => this._place()),
+            this._settings.connect('changed::vendor', () => this._place()),
         ];
     }
 
+    // `vendor` takes a comma-separated list ("anthropic,openai"): one
+    // indicator per provider, side by side in the order given. An empty list
+    // (every vendor switch off in prefs) means NO indicator — the panel must
+    // agree with prefs rather than silently defaulting to one provider.
+    _vendors() {
+        const list = this._settings.get_string('vendor').split(',')
+            .map(v => v.trim()).filter(Boolean);
+        return [...new Set(list)];
+    }
+
     _place() {
-        const existing = Main.panel.statusArea[ROLE];
-        if (existing) {
-            existing.destroy();
-            delete Main.panel.statusArea[ROLE];
-        }
-        this._indicator = new Indicator(this._settings, () => this.openPreferences(),
-            this.dir.get_child('icons'));
+        this._clear();
         const box = this._settings.get_string('panel-box') || 'right';
         const index = Math.max(0, this._settings.get_int('panel-index'));
-        Main.panel.addToStatusArea(ROLE, this._indicator, index, box);
+        this._vendors().forEach((vendor, i) => {
+            const indicator = new Indicator(this._settings, () => this.openPreferences(),
+                this.dir.get_child('icons'), vendor);
+            Main.panel.addToStatusArea(`${ROLE}:${vendor}`, indicator, index + i, box);
+            this._indicators.push({role: `${ROLE}:${vendor}`, indicator});
+        });
+    }
+
+    _clear() {
+        for (const {role, indicator} of this._indicators) {
+            indicator.destroy();
+            delete Main.panel.statusArea[role];
+        }
+        this._indicators = [];
     }
 
     disable() {
         for (const id of this._placeIds ?? [])
             this._settings.disconnect(id);
         this._placeIds = null;
-        if (this._indicator) {
-            this._indicator.destroy();
-            this._indicator = null;
-        }
-        delete Main.panel.statusArea[ROLE];
+        this._clear();
         this._settings = null;
     }
 }

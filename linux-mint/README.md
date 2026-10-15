@@ -9,7 +9,10 @@
 There is no Mint frontend on upstream `main` to capture as "before".
 
 This frontend uses the official `ai-usagebar usage --json` report. It does not
-implement provider authentication, quota retrieval or caching. On Cinnamon/X11,
+implement provider authentication, quota retrieval or caching. When the report
+includes `overview_vendors`, cards follow that list — first occurrence of
+each slug — and leave other providers after it. An empty list keeps the
+report order. Without the field, the configured primary stays first. On Cinnamon/X11,
 the GTK status icon opens the dashboard with a left click and the options menu
 with a right click. The dashboard hides when it loses focus and stays out of
 the taskbar. It uses Mint's XApp StatusIcon so the icon appears in the
@@ -23,6 +26,8 @@ The interface uses English by default and Portuguese when `LANG` or
 `LC_MESSAGES` starts with `pt`.
 Each provider header has a settings button that opens its configuration guidance
 and `config.toml`, plus a refresh button that reloads the shared usage report.
+The tray refreshes automatically every five minutes; shorter polling can rate-limit
+the Claude and Codex quota endpoints. Manual refresh is available from the panel.
 Bars follow the report's severity when no pacing data is available. With a
 reset time and window duration, blue means usage is projected to leave at
 least 10% spare, yellow means the projection is close to the limit, and red
