@@ -118,6 +118,10 @@ MouseArea {
                         required property int index
                         readonly property var row: Logic.metricForWindow(
                             provider.modelData, metric.modelData)
+                        readonly property var pace: metric.row
+                            ? Logic.elapsedPercent(metric.row.resetAt,
+                                metric.row.windowSecs, root.applet.nowMs)
+                            : null
                         spacing: Math.round(Kirigami.Units.smallSpacing / 2)
                         Layout.leftMargin: metric.index > 0
                             ? Kirigami.Units.largeSpacing : 0
@@ -134,7 +138,7 @@ MouseArea {
                             color: metric.row
                                 ? (Logic.severityColor(Logic.pacingSeverity(
                                     metric.row.percent,
-                                    metric.row.elapsedPercent,
+                                    metric.pace,
                                     metric.row.severity), root.applet.colors)
                                     ?? Kirigami.Theme.textColor)
                                 : Kirigami.Theme.textColor
@@ -146,8 +150,8 @@ MouseArea {
                         PlasmaComponents.Label {
                             Layout.minimumWidth: paceMetrics.advanceWidth
                             Layout.preferredWidth: paceMetrics.advanceWidth
-                            text: metric.row && metric.row.elapsedPercent !== null
-                                ? "(" + metric.row.elapsedPercent + "%)" : "(—)"
+                            text: metric.pace !== null
+                                ? "(" + metric.pace + "%)" : "(—)"
                             horizontalAlignment: Text.AlignRight
                             opacity: 0.8
                             font.family: "monospace"

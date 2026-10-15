@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {
     buildArgv, buildCommand, buildTuiCommand, cardFor, cardModel, cardState,
     DEFAULT_BINARY, DEFAULT_TIMEOUT_SECS,
-    detailRows, displayedEntries, entryFor, errorMessage, EXIT_KILLED, EXIT_TIMED_OUT, formatDuration,
+    detailRows, displayedEntries, elapsedPercent, entryFor, errorMessage, EXIT_KILLED, EXIT_TIMED_OUT, formatDuration,
     headline, isAlarming, MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS,
     metricDetail, metricForWindow, nextVendor, pacingSeverity, paletteFromTheme, panelCells, parseReport,
     resetRemainingMs, safeText, severityColor, severityOf, SEVERITIES, shellQuote,
@@ -140,7 +140,7 @@ assert.match(multiCompactQml, /\["5h",\s*"7d"\]/,
 assert.match(multiCompactQml,
     /entry\.id\s*===\s*"openai"[\s\S]*?return\s*\["5h",\s*"7d"\]/,
     'the Codex compact block must show both restored usage windows');
-assert.match(multiCompactQml, /elapsedPercent/,
+assert.match(multiCompactQml, /Logic\.elapsedPercent\(/,
     'the compact representation must keep pacing visible');
 assert.match(multiCompactQml, /Logic\.pacingSeverity\(/,
     'the compact usage colour must compare usage with pacing');
@@ -213,12 +213,12 @@ const RAW = JSON.stringify({
             sections: [
                 {type: 'spacer'},
                 {type: 'metric', label: 'Session (5h)', value: '62%', percent: 62,
-                    elapsed_percent: 40,
+                    window_secs: 18000,
                     severity: 'mid', reset_at: '2026-01-01T02:00:00Z',
                     detail: 'Resets in 2h · 40% elapsed · 22pts over'},
                 {type: 'spacer'},
                 {type: 'metric', label: 'Weekly (7d)', value: '91%', percent: 91,
-                    elapsed_percent: 55,
+                    window_secs: 604800,
                     severity: 'critical', reset_at: '2026-01-04T00:00:00Z',
                     detail: 'Resets in 3d'},
             ],
@@ -229,10 +229,10 @@ const RAW = JSON.stringify({
             fetched_at: '2026-01-01T00:00:00Z',
             sections: [
                 {type: 'metric', label: 'Codex 5h', value: '5%', percent: 5,
-                    elapsed_percent: 32, severity: 'low',
+                    window_secs: 18000, severity: 'low',
                     reset_at: '2026-01-01T02:00:00Z', detail: '32% elapsed'},
                 {type: 'metric', label: 'Codex weekly', value: '68%', percent: 68,
-                    elapsed_percent: 40, severity: 'mid',
+                    window_secs: 604800, severity: 'mid',
                     reset_at: '2026-01-04T00:00:00Z', detail: '40% elapsed'},
                 {type: 'block', label: 'Credits', body: ['balance: $4.10']},
             ],
@@ -450,10 +450,10 @@ assert.deepEqual(displayedEntries(report, {0: 'openai', 1: 'anthropic', length: 
     ['openai', 'anthropic'], 'KConfig array-like string lists are supported');
 
 assert.equal(metricForWindow(anthropic, '5h').percent, 62);
-assert.equal(metricForWindow(anthropic, '5h').elapsedPercent, 40);
+assert.equal(metricForWindow(anthropic, '5h').windowSecs, 18000);
 assert.equal(metricForWindow(anthropic, '7d').percent, 91);
 assert.equal(metricForWindow(openai, '5h').percent, 5);
-assert.equal(metricForWindow(openai, '5h').elapsedPercent, 32);
+assert.equal(metricForWindow(openai, '5h').windowSecs, 18000);
 assert.equal(metricForWindow(openai, '7d').percent, 68);
 assert.equal(metricForWindow(zai, '7d'), null);
 
@@ -566,6 +566,16 @@ assert.ok(resetRemainingMs('2026-01-01T00:00:00Z', NOW) < 0, 'a past reset is ne
 assert.equal(resetRemainingMs('', NOW), null);
 assert.equal(resetRemainingMs('not a date', NOW), null);
 assert.equal(resetRemainingMs(undefined, NOW), null);
+
+assert.equal(elapsedPercent('2026-01-01T02:00:00Z', 5 * 3600, NOW), 70);
+assert.equal(elapsedPercent('2026-01-01T05:30:00Z', 5 * 3600, NOW), 0,
+    'a reset beyond one full window is clamped to the start');
+assert.equal(elapsedPercent('2026-01-01T00:30:01Z', 5 * 3600, NOW), 99,
+    'rounding immediately before reset never displays 100%');
+assert.equal(elapsedPercent('2026-01-01T00:30:00Z', 5 * 3600, NOW), 0,
+    'the completed period rolls over to zero');
+assert.equal(elapsedPercent('not a date', 5 * 3600, NOW), null);
+assert.equal(elapsedPercent('2026-01-01T02:00:00Z', null, NOW), null);
 
 assert.equal(updatedAgeMs('2026-01-01T00:00:00Z', NOW), 30 * 60 * 1000);
 assert.equal(updatedAgeMs('2026-01-01T01:00:00Z', NOW), 0, 'a clock skew must not read as negative age');

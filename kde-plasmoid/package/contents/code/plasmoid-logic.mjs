@@ -110,12 +110,6 @@ function finitePercent(value) {
     return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : null;
 }
 
-function optionalPercent(value) {
-    if (value === null || value === undefined || String(value).trim() === '')
-        return null;
-    return finitePercent(value);
-}
-
 // Severity comes from the Rust core, which computes it once for every frontend.
 // Fall back to the documented 50/75/90 bands only when a field is missing or
 // unrecognised, so an older binary still renders sensible colours instead of
@@ -172,13 +166,14 @@ function normalizeSection(raw) {
             group: safeText(raw && raw.group, 80),
             value: safeText(raw.value, 40),
             percent: percent,
-            elapsedPercent: optionalPercent(raw.elapsed_percent),
             detail: safeText(raw.detail, 400),
             // Which number the panel draws. Anything but an explicit 'value' —
             // including a report old enough not to carry the field — leaves it
             // a percentage.
             headline: raw.headline === 'value' ? 'value' : 'percent',
             resetAt: safeText(raw.reset_at, 64),
+            windowSecs: Number.isFinite(Number(raw.window_secs)) && Number(raw.window_secs) > 0
+                ? Number(raw.window_secs) : null,
             severity: severityOf(percent, raw.severity),
         };
     }
@@ -569,6 +564,23 @@ export function resetRemainingMs(resetAt, nowMs) {
     if (!Number.isFinite(resetMs))
         return null;
     return resetMs - Number(nowMs);
+}
+
+// Pacing is presentation data: the report already publishes the absolute
+// reset and the fixed window length. Deriving it here keeps the personal
+// plasmoid independent from the Rust core and lets the number tick locally
+// between fetches. At the reset boundary the new period starts at zero; just
+// before it, cap rounding at 99 because a completed period does not display as
+// 100% elapsed.
+export function elapsedPercent(resetAt, windowSecs, nowMs) {
+    const remaining = resetRemainingMs(resetAt, nowMs);
+    const windowMs = Number(windowSecs) * 1000;
+    if (remaining === null || !Number.isFinite(windowMs) || windowMs <= 0)
+        return null;
+    if (remaining <= 0)
+        return 0;
+    const elapsed = 100 - (remaining / windowMs * 100);
+    return Math.max(0, Math.min(99, Math.round(elapsed)));
 }
 
 export function updatedAgeMs(fetchedAt, nowMs) {
