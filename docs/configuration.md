@@ -225,7 +225,10 @@ enabled = false            # opt in after signing in with Antigravity
 # Antigravity is read locally first: the running desktop product or `agy`
 # language server supplies quota over its loopback RPC. When that source is
 # unavailable — including `agy` sessions whose CSRF token is not published —
-# ai-usagebar uses the saved Google session and the Cloud Code API instead.
+# ai-usagebar asks `agy -p "/quota"` when `agy` is installed (at most every two
+# minutes), and otherwise uses the saved Google session and the Cloud Code API.
+# By default `agy` is discovered on `PATH` and in `~/.local/bin`. Set
+# `agy_binary = "~/.local/bin/agy"` to pin the exact executable.
 # The session is read-only from either the OS keyring or the CLI file:
 # ~/.gemini/antigravity-cli/antigravity-oauth-token
 # oauth_client_id = "<public installed-app client id>"
@@ -310,7 +313,13 @@ default at 97%: after a **fresh** fetch (never a cached or failed one), any
 window at or above the threshold raises one notification — normal urgency
 between the threshold and 99%, critical at 100% (exhausted). Linux delivers
 via `notify-send` (`-a ai-usagebar -c quota`); macOS delivers through
-Notification Center. The macOS popover also exposes the enable switch and
+Notification Center. A critical (100%) toast also asks for a 30-second
+timeout, so it can expire where the daemon honours one: Omarchy's notification
+plugin keeps critical toasts until they are dismissed and ignores the sender's
+timeout, and
+[omacom/omarchy#12964](https://github.com/omacom/omarchy/pull/12964) is what
+makes it honour a requested one, capped at 30s. The macOS popover also exposes
+the enable switch and
 threshold in Preferences. Windows delivery is planned for a later release.
 
 One crossing is one notification. A key re-arms only when usage drops 7

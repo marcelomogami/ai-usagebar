@@ -33,6 +33,7 @@ KCM.SimpleKCM {
     property string cfg_vendor: ""
     property var cfg_vendorRing: []
     property var cfg_displayedVendors: []
+    property string cfg_hiddenMetrics: "{}"
 
     // Which vendors exist and whether they currently work. Sourced from
     // `ai-usagebar usage --json`, which reports every entry enabled in
@@ -91,6 +92,22 @@ KCM.SimpleKCM {
         if (on)
             next.push(id);
         page.cfg_displayedVendors = next;
+    }
+
+    function hiddenMap() {
+        return Logic.parseHiddenMetrics(page.cfg_hiddenMetrics);
+    }
+
+    function setMetricVisible(providerId, key, visible) {
+        const map = page.hiddenMap();
+        const hidden = Array.from(map[providerId] || []).filter(item => item !== key);
+        if (!visible)
+            hidden.push(key);
+        if (hidden.length)
+            map[providerId] = hidden;
+        else
+            delete map[providerId];
+        page.cfg_hiddenMetrics = JSON.stringify(map);
     }
 
     Kirigami.FormLayout {
@@ -169,6 +186,49 @@ KCM.SimpleKCM {
                 width: currentVendorCombo.width
                 text: page.labelFor(modelData)
                 highlighted: currentVendorCombo.highlightedIndex === index
+            }
+        }
+
+
+        QQC2.Label {
+            Kirigami.FormData.label: i18n("Metrics:")
+            text: i18n("Choose which metrics appear in the popup, panel and tooltip. At least one stays visible per provider.")
+            font: Kirigami.Theme.smallFont
+            opacity: 0.7
+            wrapMode: Text.WordWrap
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 24
+            textFormat: Text.PlainText
+        }
+
+        Repeater {
+            model: page.vendorList
+
+            delegate: ColumnLayout {
+                id: metricGroup
+                required property var modelData
+                readonly property var choices: Logic.metricChoices(
+                    metricGroup.modelData, page.hiddenMap())
+                visible: choices.length > 1
+                spacing: Kirigami.Units.smallSpacing
+
+                QQC2.Label {
+                    text: metricGroup.modelData.label
+                    font.bold: true
+                    textFormat: Text.PlainText
+                }
+
+                Repeater {
+                    model: metricGroup.choices
+                    delegate: QQC2.CheckBox {
+                        id: metricChoice
+                        required property var modelData
+                        text: metricChoice.modelData.label
+                        checked: metricChoice.modelData.checked
+                        enabled: metricChoice.modelData.canToggle
+                        onToggled: page.setMetricVisible(
+                            metricGroup.modelData.id, metricChoice.modelData.key, checked)
+                    }
+                }
             }
         }
 

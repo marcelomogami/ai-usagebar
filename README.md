@@ -1,6 +1,6 @@
 # ai-usagebar
 
-Native Omarchy Quattro panel, Waybar widget, and tabbed TUI for AI plan usage across **Claude**, **Codex/ChatGPT**, **GitHub Copilot**, **Z.AI (GLM)**, **OpenRouter**, **DeepSeek**, **DeepInfra**, **Kimi**, **Nous Research**, **OpenCode Go**, **Command Code**, **Devin**, **Cline**, **Muse Code**, and other supported AI coding services.
+Native Omarchy Quattro panel, Waybar widget, and tabbed TUI for AI plan usage across **Claude**, **Codex/ChatGPT**, **GitHub Copilot**, **Z.AI (GLM)**, **OpenRouter**, **DeepSeek**, **DeepInfra**, **Kimi**, **Nous Research**, **OpenCode Go**, **Command Code**, **Devin**, **Cline**, **Muse Code**, **Synthetic**, and other supported AI coding services.
 
 ai-usagebar began as a Rust port of
 [`claudebar`](https://github.com/mryll/claudebar) and remains drop-in
@@ -266,7 +266,7 @@ adds a global shortcut that toggles the popover from anywhere, the poll interval
 and an update mode
 (Automatic / Notify me / Off) that installs new releases from GitHub after
 verifying their `.sha256`; all three live in the `[tray]` section of
-`config.toml` (`shortcut`, `refresh_minutes` = 1, 5 or 10; default 5;
+`config.toml` (`shortcut`, `refresh_minutes` = 1, 5, 10, 15, 30 or 60; default 5;
 `updates`). See [windows/README.md](windows/README.md).
 
 ![Windows tray icon in the notification area — a bar-chart-in-circle mark beside the overflow chevron](screenshots/windows-tray-icon.png)
@@ -296,6 +296,7 @@ come from environment variables or `config.toml`.
 | Kimi | Existing Kimi Code CLI login **or** API key (`KIMI_API_KEY` or config) | Opt in, then either log in with `kimi` (nothing to paste) or set an API key, which wins when present. A Kimi For Coding subscription can issue one at kimi.com/code/console. |
 | Kilo | API key (`KILO_API_KEY` env or `[kilo] api_key` in config) | Set either. Opt-in. For a team balance, also set `[kilo] organization_id`; omit it for the personal balance. |
 | Novita | API key (`NOVITA_API_KEY` env or `[novita] api_key` in config) | Set either. Opt-in. |
+| Synthetic | API key (`SYNTHETIC_API_KEY` env or `[synthetic] api_key` in config) | Set either. Opt-in. Reports the documented subscription request quota. |
 | Lyceum | API key (`LYCEUM_API_KEY` env or `[lyceum] api_key` in config) | Opt-in. Reports the available USD balance and amount used; no percentage quota or reset is inferred. |
 | OrcaRouter | API key (`ORCAROUTER_API_KEY` env or `[orcarouter] api_key` in config) | Set either. Opt-in. Reports the credit card (spend / total limit / remaining, key expiry) from the one-api compatible dashboard billing endpoints. |
 | Moonshot | API key (`MOONSHOT_API_KEY` or config) | Opt in. Set region `cn` for CNY; `global` uses USD. |
@@ -303,7 +304,7 @@ come from environment variables or `config.toml`.
 | SuperGrok | Existing `grok login` (its `auth.json` key, or its ACP extension) | Opt in, install Grok Build, and run `grok login`. This reports subscription usage — overall included credits plus per-product slices (Build, Chat, Imagine) — not the Management API balance. |
 | Grok Bot | Existing Grok Bot desktop sign-in (Linux and macOS) | Opt in, install the Grok Bot desktop app, and sign in to it once. This reports the app's weekly included-usage pool — not the Management API balance, and not the Grok Build subscription. Refreshed tokens stay in ai-usagebar's cache; the app's own file is never written. |
 | MiniMax | Token Plan subscription key | Opt in with `MINIMAX_API_KEY` or config. Choose the matching global or China region; pay-as-you-go keys do not work. |
-| Google Antigravity | Local Antigravity server, saved Google session, or `agy` status line | Opt in. The desktop products provide quota through their local server. The `agy` CLI can provide its live session quotas through the macOS status-line integration (see [Multiple Antigravity CLI accounts](#multiple-antigravity-cli-accounts-macos)); the existing saved-session Cloud Code API fallback remains available and is labelled `Google API` in the TUI. |
+| Google Antigravity | Local Antigravity server, `agy` itself, saved Google session, or `agy` status line | Opt in. The desktop products provide quota through their local server. With the `agy` CLI installed, quota is read from `agy -p "/quota"` — the figures its own Models & Quota page shows — at most every two minutes. The `agy` CLI can also provide its live session quotas through the macOS status-line integration (see [Multiple Antigravity CLI accounts](#multiple-antigravity-cli-accounts-macos)); the saved-session Cloud Code API fallback answers when neither can, and is labelled `Google API` in the TUI. |
 | Cursor | Existing Cursor IDE or `cursor-agent` login | Opt in and sign in once. `cursor-agent` is the headless fallback. |
 | Kiro CLI | Existing kiro-cli login | Opt in and run `kiro-cli login` once. ai-usagebar refreshes the session when needed. |
 | Nous Research | OAuth device flow | Enable `[nous]`, click **Log in with Nous Research** in the Omarchy settings panel, or run `ai-usagebar auth nous login`. Credentials are kept in ai-usagebar's separate platform config directory (`~/.config/ai-usagebar/credentials.json` on Linux). |
@@ -495,16 +496,21 @@ api_key_env = "MYTOOL_API_KEY"   # env var first, inline api_key second
 label = "Requests"
 used = "/usage/requests/used"    # numbers or numeric strings
 limit = "/usage/requests/limit"  # or percent = "/usage/pct" instead of used + limit
+currency = "USD"                 # optional; formats used and limit as money
 resets_at = "/usage/requests/reset_at"   # RFC 3339, epoch seconds or epoch ms
 window_secs = 86400              # window length; reported as `window_secs` for pacing
 
 [[custom.texts]]
 label = "Balance"
-value = "/balance/display"
+value = "/balance"               # string, number or boolean
+currency = "USD"                 # optional; when set, value must be numeric
 ```
 
 Each metric renders as a meter with the usual severity colours; texts render
-as one-line rows. `brand` lets supporting frontends, currently the Omarchy
+as one-line rows. `currency` accepts a three-letter uppercase code. Known
+currencies use their symbol; other codes follow the amount (for example,
+`3.50 SEK`). A metric cannot combine `currency` with a ready-made `percent`.
+`brand` lets supporting frontends, currently the Omarchy
 widget, draw a built-in vendor's mark for the custom entry; omit it to keep the
 `short_name` tag. The cache under `<cache>/ai-usagebar/custom/<id>` holds the
 projected snapshot (only the values the pointers selected, never the response
@@ -737,7 +743,11 @@ of the reset window in seconds. `window_secs` is present only when the vendor
 states the window (rolling 5h/7d windows; Cursor's billing cycle from
 `billingCycleStart`/`billingCycleEnd`, never guessed as a month when the start
 is missing) and is omitted, not `null`, otherwise — a calendar month or an
-unstated window gives a frontend nothing to pace against. Cursor's On-Demand text row
+unstated window gives a frontend nothing to pace against. A per-model quota
+pool's metric (Antigravity's "Gemini 4 Argon") carries `model_pool: true`, and
+the field is omitted otherwise: it is one model's own limit rather than a
+window the whole provider shares, so a frontend that sums a provider up in one
+figure ranks it below the shared windows. Cursor's On-Demand text row
 may also carry `used_cents`, `limit_cents`, and `percent`: the spend and the
 prepaid cap in USD cents, and how much of that cap is already used (rounded
 half up, and above 100 when spend passes the cap). Those fields are omitted,

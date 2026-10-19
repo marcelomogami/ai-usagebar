@@ -1,5 +1,236 @@
 ## [Unreleased]
 
+## [1.41.0] — 2026-10-18
+
+### Changed
+
+- **A critical quota toast now asks `notify-send` for a 30-second timeout**
+  (`-t 30000`), so a 100% alert can expire on its own. Omarchy's notification
+  plugin treats critical urgency as immortal and throws the sender's timeout
+  away, so this changes nothing there until
+  [omacom/omarchy#12964](https://github.com/omacom/omarchy/pull/12964) lands;
+  that honours a positive timeout capped at 30s, while a critical toast sent
+  without one still stays until dismissed. Daemons that already honour `-t`
+  start expiring it now. Normal toasts still leave the timeout to the daemon.
+
+### Fixed
+
+- **Anthropic API spend states exactly how current it is.** The cost endpoint
+  returns completed daily buckets, so its total can omit today's activity. The
+  card and tooltip now show the last fully covered UTC day instead of implying
+  that the figure includes the live day (#459).
+
+- **Claude extra-usage spend stays visible when credits run out.** The API
+  marks provider-disabled extra usage as inactive at the moment its status and
+  month-to-date spend matter most. The row now distinguishes that state from a
+  user-disabled setting and explains whether credits or the monthly limit ran
+  out (#456).
+
+- **Nous Research credit amounts format as USD in detail lines and tooltips.**
+  Credit balances on the popover and TUI cards, the card detail rows, and the
+  Waybar tooltip now format with a currency sign through the shared USD helper
+  rather than printing bare numbers. The `{nous_balance}` and `{balance}`
+  placeholders now surface the total usable credits formatted as USD (#457).
+
+### Added
+
+- **KDE Plasma can hide individual metrics per provider.** Configure now lists
+  each provider's reported metrics. A disabled metric leaves the popup, compact
+  panel, tooltip, headline and card severity, while the final visible metric
+  stays locked so an applet cannot become blank (#460).
+
+- **Custom providers can format metric footnotes and text rows as money.** An
+  optional `currency` setting on `[[custom.metrics]]` and `[[custom.texts]]`
+  accepts a three-letter uppercase currency code (such as `"USD"` or `"EUR"`) and
+  formats the amounts through the program's standard money formatter, matching
+  built-in money rows instead of displaying bare numbers.
+
+## [1.40.1] — 2026-10-17
+
+### Fixed
+
+- **With several `agy` sessions open, the macOS Antigravity entry shows the
+  latest reading of the quota, not the latest redraw.** Each `agy` process
+  re-sends the quota it last fetched every time it redraws its status line,
+  and it fetches only after a turn of its own, so an idle session keeps
+  sending its startup figures under a fresh timestamp. The entry used
+  whichever session redrew last, so it flipped between their figures and
+  often showed the oldest. Readings are now ordered by the figures themselves
+  — a window's reset only moves later, and within a window usage only grows —
+  and the arrival time decides only when the figures cannot. Closing the busy
+  session no longer drops the entry back to an idle one's older figures
+  either: a closed session's reading stands while it is still the latest and
+  another session of the account is running.
+
+- **macOS menu bar parses and displays Synthetic subscription quota.**
+  Selecting Synthetic in the menu bar now displays its subscription request
+  quota with a dedicated label and hides the unused weekly window, while the
+  format string mirrors the `{synthetic_pct}` and `{synthetic_reset}`
+  placeholders.
+
+- **Antigravity reads `agy`'s own quota when `agy` is installed.** With only
+  the `agy` CLI signed in, the remote fallback asked the Cloud Code API, which
+  answers an `agy` account with a different reading: prod's Gemini group is
+  another tracker (an untouched week showed 0% while `agy` showed 37%), and
+  daily leaves the Gemini group out. The fallback now asks
+  `agy -p "/quota"` first — the figures `agy`'s own Models & Quota page shows,
+  Argon included — and goes to the Cloud Code API only when `agy` cannot
+  answer. A reading starts `agy`, so it is taken at most every two minutes,
+  and a failed one is not retried for ten. `[antigravity] agy_binary` can pin
+  the executable instead of trusting the ambient `PATH` (#450).
+
+- **The macOS tray keeps Antigravity's place and stars across reboots.** The
+  popover dropped the saved settings of any card a payload lacked, and
+  Antigravity's entry switches id — `antigravity` with no `agy` status-line
+  session, `antigravity@<account>` with one — on every reboot and whenever the
+  last session closes. Its place in Customize, its starred metrics and its
+  rows went back to the defaults each time. A card missing from a payload now
+  keeps its settings for when it returns, and an id seen for the first time
+  takes over the place and settings of its sole absent sibling of the same
+  provider. Ambiguous multi-account histories remain separate instead of
+  assigning one account's preferences to another (#452).
+
+- **An exhausted Gemini 4 Argon no longer reads as an exhausted Antigravity
+  in the macOS menu bar.** The Logos and Quattro chips, and the popover's
+  provider tabs, show a provider's busiest quota window, and the per-model
+  pool counted as one: at 100% it hid shared Gemini windows at 55% and 39%
+  that Flash, Pro, Claude and GPT-OSS still draw on. The report now marks a
+  per-model pool's metric `model_pool: true`, and those summaries rank it
+  like a breakdown row — it stands in only when nothing the provider shares
+  is left. The pool keeps its own row and still counts toward severity and
+  notifications (#453).
+
+## [1.40.0] — 2026-10-17
+
+### Added
+
+- **Antigravity shows per-model quota pools.** On Pro plans the "Gemini 4
+  Argon" models have a weekly limit of their own, separate from the shared
+  Gemini pool. It now appears as its own row, named as Antigravity names it,
+  under the Weekly heading of the tooltip, the TUI, and every desktop frontend
+  that draws the report; it also counts toward the panel's severity and
+  notifications. The macOS `agy` status-line bridge also carries the known
+  Argon bucket, and Omarchy treats it as part of the Gemini pool for filtering
+  and the bar headline. Any future pool reported with a display name is shown
+  too. The bar's `{placeholder}` slots are unchanged.
+
+### Fixed
+
+- **Antigravity no longer fails with "duplicate Gemini weekly bucket".** The
+  per-model pool's bucket id (`gemini-argon-wtu-weekly`) looked like the shared
+  Gemini weekly bucket to the parser, which classified by id prefix and
+  suffix, so every refresh failed as a duplicate. The four canonical bucket
+  ids now always claim their slot, and the prefix/suffix and group-name
+  inference runs only when none of them arrived. A pool that will not parse is
+  left out instead of failing the shared windows.
+
+- **The macOS status-line path cannot show a model's own limit as Gemini
+  weekly.** It kept the first bucket of each kind in key order, where
+  `gemini-argon-wtu-weekly` sorts ahead of `gemini-weekly`. Canonical ids now
+  take precedence there too. Their presence is checked before parsing values;
+  while any is present, missing or malformed shared windows stay empty instead
+  of borrowing a model pool's quota.
+
+- **Cached Antigravity pool labels keep the same display-safety guarantee as
+  live responses.** A locally damaged cache can no longer reintroduce control
+  characters into terminal or desktop renderers.
+
+- **Grok sign-in hint points to Settings API key.** `VendorId::Grok` requires an
+  API key (`[grok]` or `XAI_MANAGEMENT_KEY`), but its sign-in hint erroneously
+  suggested running `grok`, which belongs to SuperGrok. The hint now instructs
+  the user to add an API key in Settings, matching its tray action and provider
+  auth kind.
+
+- **Omit non-positive window durations from report `window_secs`.** Unstated
+  renewal cycles or zero-length windows (such as Synthetic's subscription quota)
+  were emitting `"window_secs": 0` in reports instead of omitting the field.
+  Metrics with unstated durations now omit `window_secs`, matching Kiro and the
+  documented schema.
+
+## [1.39.1] — 2026-10-17
+
+### Fixed
+
+- **Credential fallback and Z.AI in-band authentication failures have direct
+  regression coverage.** Tests now pin environment-over-inline API-key
+  precedence and ensure Z.AI's HTTP-200 `Authentication Failed` envelope is
+  rejected instead of being treated as usage data.
+
+## [1.39.0] — 2026-10-16
+
+### Added
+
+- **Synthetic subscription quota.** Enable `[synthetic]` and provide
+  `SYNTHETIC_API_KEY` (or an inline `api_key`) to read the documented
+  `api.synthetic.new/v2/quotas` subscription request count, limit, percentage,
+  and renewal. The provider is available in the widget, TUI, reports, and
+  native tray settings (#440).
+
+- **Windows shows starred usage when the tray icon is hovered.** The native
+  tooltip follows the popover's provider order, starred metrics, and Used/Left
+  preference, and updates when either the report or those preferences change
+  (#434).
+
+- **The tray lists every provider in Settings, enabled or not.** Settings →
+  Providers (and Classic's Customize screen) used to show only the providers
+  `usage --json` reported, so one switched off in `config.toml` had no row and
+  no way back on — Cursor, which `config.example.toml` ships as
+  `enabled = false` and detection never overrides, simply never appeared. The
+  list now comes from the Rust provider catalog: each provider has a switch
+  that writes `enabled`, a status line, and for one with no credential a
+  Sign in / Open app / Add key button (the login command in a terminal,
+  Cursor or Antigravity on macOS, or the TUI's Settings).
+
+- **Add Claude Code, Claude Desktop and Codex accounts from the tray** (macOS).
+  The Claude and Codex rows in Settings → Providers open Terminal, ask for the
+  label, and run `account add`, as the Swift menu bar did.
+
+- **Refresh every 15, 30 or 60 minutes.** `[tray] refresh_minutes` and the
+  tray's Refresh Every picker accept them alongside 1, 5 and 10.
+
+- **Cursor's On-Demand cap draws as a bar in the tray**, and a stale card says
+  how old its numbers are. Capped text rows now carry `severity` in
+  `usage --json`.
+
+### Fixed
+
+- **Antigravity's remote fallback reads quota from prod before the daily
+  channel.** The daily `retrieveUserQuotaSummary` answers 200 with only the
+  Claude/GPT group — no Gemini buckets — and the lenient parser accepts any
+  recognised window, so a machine with Antigravity closed showed the
+  third-party pool's zeros while the real Gemini windows went unreported (a
+  weekly window at 95% read as nothing at all). Quota now leads with the prod
+  channel, which serves both groups; daily stays as failover, the role it
+  already played, and the plan lookup keeps its original order.
+
+- **A provider switched on after first launch reaches the macOS menu bar.**
+  The popover filled the menu bar's stars only while none were stored — on
+  first launch — and dropped a provider's stars whenever a payload arrived
+  without it, so a provider enabled later never showed in the Logos strip,
+  and Antigravity fell out of it each time its entry switched between
+  `antigravity` and `antigravity@<account>` with `agy` sessions (#437). Every
+  provider without a stars entry now gets its default stars, and unstarring a
+  provider's last metric stores an empty list that survives restarts, so
+  taking a provider off the menu bar still sticks.
+
+- **The tray draws OpenCode Go's mark**, and Kilo, Novita, Kiro, Nous, Ollama,
+  Devin and Muse Code get theirs instead of initials. The mark tables keyed
+  OpenCode Go as `opencode_go` while entries use the `opencode-go` slug. A
+  `[[custom]]` provider that declares a `brand` now draws that brand's mark.
+
+### Security
+
+- **The macOS tray creates terminal launchers inside private temporary
+  directories.** The previous predictable file directly under the system temp
+  directory could follow a symlink planted by another local user. Launchers
+  now use atomically created mode-0700 directories and files, escape the
+  AppleScript string boundary, and remove their directory when finished.
+
+- **The Rust network stack includes the latest advisory fixes.** The lockfile
+  now uses `quinn-proto` 0.11.18 and `rustls` 0.23.46, resolving the current
+  RustSec advisories for remote denial of service, TLS debug disclosure, ECH
+  rejection handling, certificate decompression, and key-exchange downgrade.
+
 ## [1.38.1] — 2026-10-16
 
 ### Fixed
@@ -4418,7 +4649,12 @@ vendors. Highlights:
 - Live API smoke test suite (`make smoke`) that exercises the real
   undocumented endpoints to detect schema drift before users do.
 
-[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.38.1...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-usagebar/compare/v1.41.0...HEAD
+[1.41.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.40.1...v1.41.0
+[1.40.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.40.0...v1.40.1
+[1.40.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.39.1...v1.40.0
+[1.39.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.39.0...v1.39.1
+[1.39.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.38.1...v1.39.0
 [1.38.1]: https://github.com/akitaonrails/ai-usagebar/compare/v1.38.0...v1.38.1
 [1.38.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.37.0...v1.38.0
 [1.37.0]: https://github.com/akitaonrails/ai-usagebar/compare/v1.36.0...v1.37.0

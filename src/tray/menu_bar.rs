@@ -6,7 +6,9 @@
 
 use serde_json::Value;
 
-use super::strip::{HiddenRows, StripContent, StripMetric, quota_group};
+use super::strip::{
+    HiddenRows, StripContent, StripMetric, UsageReading, metric_text, quota_group, safe_text,
+};
 
 /// Artwork needed for the current status-item content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,35 +82,6 @@ pub(super) fn status_item_content(look: MenuBarLook, has_content: bool) -> Statu
         StatusItemContent::Chart
     } else {
         StatusItemContent::Logos
-    }
-}
-
-/// How the popover reads a quota (Preferences → Show Usage As). The menu
-/// bar's percentages follow it, so the chip says `82%` left when the tab
-/// that selects it does, not the `18%` used behind it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum UsageReading {
-    Used,
-    Left,
-}
-
-impl UsageReading {
-    /// Read the `strip` IPC's `show_as`. Anything else keeps used, the
-    /// reading the menu bar had before the popover reports one.
-    pub(super) fn from_strip_ipc(value: &Value) -> Self {
-        match value.get("show_as").and_then(Value::as_str) {
-            Some("left") => Self::Left,
-            _ => Self::Used,
-        }
-    }
-}
-
-/// A metric's text in `reading`: its remaining share in Left when it has a
-/// percent, its report value otherwise.
-fn metric_text(metric: &StripMetric, reading: UsageReading) -> &str {
-    match (reading, metric.left_value.as_deref()) {
-        (UsageReading::Left, Some(left)) => left,
-        _ => metric.value.trim(),
     }
 }
 
@@ -305,31 +278,6 @@ fn segment(
     })
 }
 
-/// Build tooltip lines for the starred groups in `reading`, or the app name
-/// when none have values.
-pub(super) fn tooltip(content: &StripContent, reading: UsageReading) -> String {
-    let lines: Vec<String> = content
-        .groups
-        .iter()
-        .filter_map(|(_, name, metrics)| {
-            let values: Vec<&str> = metrics
-                .iter()
-                .map(|metric| metric_text(metric, reading))
-                .filter(|value| !value.is_empty())
-                .collect();
-            if values.is_empty() {
-                return None;
-            }
-            Some(format!("{} · {}", safe_text(name), values.join(" ")))
-        })
-        .collect();
-    if lines.is_empty() {
-        "AI Usage".into()
-    } else {
-        lines.join("\n")
-    }
-}
-
 fn short_name_for(report: &Value, id: &str) -> Option<String> {
     report
         .get("entries")?
@@ -343,17 +291,9 @@ fn short_name_for(report: &Value, id: &str) -> Option<String> {
         .map(safe_text)
 }
 
-fn safe_text(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect::<String>()
-        .trim()
-        .to_owned()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::strip::tooltip;
     use super::*;
     use serde_json::json;
 
@@ -923,6 +863,7 @@ mod tests {
             left_value: None,
             value_headline: false,
             grouped: false,
+            model_pool: false,
         }
     }
 
@@ -993,6 +934,58 @@ mod tests {
 
         assert_eq!(value("anthropic"), vec![String::from("0%")]);
         assert_eq!(value("supergrok"), vec![String::from("7%")]);
+    }
+
+    /// #453: an exhausted per-model pool (Antigravity's Gemini 4 Argon) is one
+    /// model's limit: Flash, Pro, Claude and GPT-OSS still have room, so the
+    /// chip reads the busiest window the provider shares. The pool stands in
+    /// only when nothing shared is left to show.
+    #[test]
+    fn logos_rank_a_model_pool_below_the_shared_windows() {
+        let antigravity = |sections: Value| json!({"primary":null, "entries":[{"id":"antigravity", "status":"ready", "sections": sections}]});
+        let heading = |label: &str| json!({"type":"text", "label": label, "value":""});
+        let metric = |label: &str, percent: u32| json!({"type":"metric", "label": label, "percent": percent, "value": format!("{percent}%")});
+        let pool = |label: &str, percent: u32| {
+            json!({"type":"metric", "label": label, "percent": percent,
+                   "value": format!("{percent}%"), "model_pool": true})
+        };
+        let chip = |report: &Value, hidden: &HiddenRows| {
+            logo_segments(
+                &starred(&["antigravity"]),
+                report,
+                MenuBarLook::Logos,
+                None,
+                false,
+                UsageReading::Used,
+                hidden,
+            )[0]
+            .values
+            .clone()
+        };
+        let report = antigravity(json!([
+            heading("Session"),
+            metric("Gemini", 55),
+            metric("Claude & GPT OSS", 0),
+            heading("Weekly"),
+            metric("Gemini", 39),
+            pool("Gemini 4 Argon", 100),
+            metric("Claude & GPT OSS", 0),
+        ]));
+        assert_eq!(chip(&report, &HiddenRows::new()), vec![String::from("55%")]);
+
+        // With every shared window hidden, the pool is what is left to show.
+        let hidden = HiddenRows::from([(
+            String::from("antigravity"),
+            [
+                "metric:Gemini (Session)",
+                "metric:Claude & GPT OSS (Session)",
+                "metric:Gemini (Weekly)",
+                "metric:Claude & GPT OSS (Weekly)",
+            ]
+            .map(String::from)
+            .to_vec(),
+        )]);
+        assert_eq!(chip(&report, &hidden), vec![String::from("100%")]);
     }
 
     /// A value headline that carries a percent (a prepaid balance meter, a

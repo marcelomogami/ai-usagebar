@@ -811,6 +811,14 @@ async fn build_outcome(client: &Client, config: &Config, tab: &TabId) -> Result<
                     .await?;
             Ok(outcome.into())
         }
+        VendorId::Synthetic => {
+            let (api_key, cache) = api_key_and_cache(config, vendor, tab.account.as_deref())?;
+            let endpoints = crate::synthetic::fetch::Endpoints::default();
+            let outcome =
+                crate::synthetic::fetch_snapshot(client, &api_key, &cache, &endpoints, DEFAULT_TTL)
+                    .await?;
+            Ok(outcome.into())
+        }
         VendorId::Moonshot => {
             let (api_key, cache) = api_key_and_cache(config, vendor, tab.account.as_deref())?;
             let (endpoints, currency) =
@@ -868,6 +876,7 @@ async fn build_outcome(client: &Client, config: &Config, tab: &TabId) -> Result<
                 &cache,
                 DEFAULT_TTL,
                 oauth.as_ref(),
+                config.antigravity.agy_binary.as_deref(),
                 config.antigravity.ide_language_server,
             )
             .await?;

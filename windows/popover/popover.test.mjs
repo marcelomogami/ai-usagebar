@@ -6,6 +6,7 @@ import {
   formatDuration,
   nextUpdateLabel,
   parseHostPayload,
+  providerState,
   projectCards,
   resetLabel,
   friendlyError,
@@ -848,6 +849,7 @@ assert.equal(resetAlternate(badStampRow, 'exact', resetNow, utc), '');
   assert.equal(parseHostPayload({ refresh_minutes: 10 }).refreshMinutes, 10);
   assert.equal(parseHostPayload({ refresh_minutes: 1 }).refreshMinutes, 1);
   assert.equal(parseHostPayload({ refresh_minutes: 7 }).refreshMinutes, 5);
+  assert.equal(parseHostPayload({ refresh_minutes: 60 }).refreshMinutes, 60);
   assert.equal(parseHostPayload({ refresh_minutes: '10' }).refreshMinutes, 10);
   assert.equal(parseHostPayload({ refresh_minutes: 'often' }).refreshMinutes, 5);
   assert.equal(parseHostPayload({}).refreshMinutes, 5);
@@ -1315,6 +1317,24 @@ assert.equal(quotaAlternate(null, 'left'), '');
   assert.equal(new Set(card.rows.map(rowKey)).size, card.rows.length);
   assert.equal(visibleRowsFor(card, { collapsed: false }).length, 4);
   assert.equal(metricCount(card), 4);
+  assert.ok(card.rows.every((r) => r.modelPool === false), 'no row claims to be a model pool');
+
+  // ASSERT: the report's `model_pool` reaches the row it marks, and only that one (#453)
+  const pooled = parseHostPayload({
+    entries: [{
+      id: 'antigravity',
+      display_name: 'Antigravity',
+      sections: [
+        { type: 'text', label: 'Weekly', value: '' },
+        { type: 'metric', label: 'Gemini', percent: 39, severity: 'low' },
+        { type: 'metric', label: 'Gemini 4 Argon', percent: 100, severity: 'critical', model_pool: true },
+      ],
+    }],
+  });
+  assert.deepEqual(
+    projectCards(pooled, 0)[0].rows.map((r) => [r.label, r.modelPool]),
+    [['Gemini (Weekly)', false], ['Gemini 4 Argon (Weekly)', true]],
+  );
 
   // ASSERT: a vendor repeating a label outright still yields distinct rows
   const repeated = parseHostPayload({
@@ -1631,6 +1651,174 @@ assert.equal(resolvedTheme('system'), 'light');
   // The menu bar follows the Used/Left reading, so the strip message carries it.
   assert.equal(stripCommand({ ...seeded, showAs: 'used' }, cards).show_as, 'used');
   assert.equal(stripCommand({ ...seeded, showAs: 'sideways' }, cards).show_as, 'left');
+}
+
+// --- stars for providers that arrive late, and stars taken off on purpose (#437) --
+
+{
+  // ARRANGE: Claude was starred on first launch; Antigravity was enabled later
+  const payload = parseHostPayload({
+    entries: [
+      { id: 'anthropic', display_name: 'Claude', sections: [
+        { type: 'metric', label: 'Session', percent: 41 },
+        { type: 'metric', label: 'Weekly', percent: 19 },
+      ] },
+      { id: 'antigravity', display_name: 'Antigravity', sections: [
+        { type: 'text', label: 'Session', value: '' },
+        { type: 'metric', label: 'Gemini', percent: 0 },
+        { type: 'text', label: 'Weekly', value: '' },
+        { type: 'metric', label: 'Gemini', percent: 95 },
+      ] },
+    ],
+  });
+  const cards = projectCards(payload, 0);
+  const remembered = { ...emptyLayout(), stars: { anthropic: ['metric:Weekly'] } };
+
+  // ACT
+  const seeded = seedStars(remembered, cards);
+
+  // ASSERT: the newcomer gets its defaults and reaches the strip; the remembered
+  // choice is untouched, and with nothing left to seed the same layout comes back
+  assert.deepEqual(seeded.stars.anthropic, ['metric:Weekly']);
+  assert.deepEqual(seeded.stars.antigravity, ['metric:Gemini (Session)', 'metric:Gemini (Weekly)']);
+  assert.deepEqual(stripCommand(seeded, cards).stars.antigravity, ['metric:Gemini (Session)', 'metric:Gemini (Weekly)']);
+  assert.equal(seedStars(seeded, cards), seeded);
+}
+
+{
+  // ARRANGE: two starred providers
+  const payload = parseHostPayload({
+    entries: [
+      { id: 'anthropic', display_name: 'Claude', sections: [{ type: 'metric', label: 'Weekly', percent: 19 }] },
+      { id: 'openai', display_name: 'Codex', sections: [{ type: 'metric', label: 'Codex weekly', percent: 2 }] },
+    ],
+  });
+  const cards = projectCards(payload, 0);
+  const start = seedStars(emptyLayout(), cards);
+  assert.deepEqual(start.stars.openai, ['metric:Codex weekly']);
+
+  // ACT: the user unstars Codex's only metric
+  const off = { ...start, stars: toggleStar(start.stars, 'openai', 'metric:Codex weekly').stars };
+
+  // ASSERT: an explicit empty list that seeding, storage, sync and the strip respect
+  assert.deepEqual(off.stars.openai, []);
+  assert.equal(seedStars(off, cards), off);
+  const restored = normalizeLayout(JSON.parse(JSON.stringify(off)));
+  assert.deepEqual(restored.stars.openai, []);
+  assert.equal(seedStars(restored, cards), restored);
+  assert.deepEqual(syncLayout(restored, ['anthropic', 'openai']).stars.openai, []);
+  assert.deepEqual(stripCommand(off, cards).stars, { anthropic: ['metric:Weekly'] });
+}
+
+{
+  // ARRANGE: Antigravity's entry id switches as agy statusline sessions come and go
+  const entriesFor = (id) => [
+    { id: 'anthropic', display_name: 'Claude', sections: [{ type: 'metric', label: 'Weekly', percent: 19 }] },
+    { id, display_name: 'Antigravity', sections: [{ type: 'metric', label: 'Gemini', percent: 95 }] },
+  ];
+  const step = (layout, id) => {
+    const payload = parseHostPayload({ entries: entriesFor(id) });
+    return seedStars(absorbPayload(layout, payload.entries), projectCards(payload, 0));
+  };
+
+  // ACT: the plain id, then a per-account one, then the plain id again
+  const first = step(emptyLayout(), 'antigravity');
+  const perAccount = step(first, 'antigravity@abc123');
+  const back = step(perAccount, 'antigravity');
+
+  // ASSERT: whichever id the report uses is starred, so the strip never drops it
+  assert.deepEqual(first.stars.antigravity, ['metric:Gemini']);
+  assert.deepEqual(perAccount.stars['antigravity@abc123'], ['metric:Gemini']);
+  assert.deepEqual(back.stars.antigravity, ['metric:Gemini']);
+}
+
+{
+  // ARRANGE: the user's own place, stars, rows and flags for Antigravity's
+  // per-account entry, among other providers (#452)
+  const mine = {
+    ...emptyLayout(),
+    seeded: true,
+    cardOrder: ['anthropic', 'supergrok', 'antigravity@abc123', 'zai'],
+    hidden: { zai: true },
+    collapsed: { 'antigravity@abc123': true },
+    rows: { 'antigravity@abc123': { always: ['metric:Gemini (Weekly)'], demand: [], off: {} } },
+    stars: {
+      anthropic: ['metric:Session (5h)'],
+      'antigravity@abc123': ['metric:Gemini (Session)', 'metric:Gemini (Weekly)'],
+    },
+  };
+
+  // ACT: a reboot leaves no agy session, so the plain id comes back; then one starts
+  const plain = syncLayout(mine, ['anthropic', 'supergrok', 'antigravity', 'zai']);
+  const again = syncLayout(plain, ['anthropic', 'supergrok', 'antigravity@abc123', 'zai']);
+
+  // ASSERT: the plain id takes the card's place and settings over, and hands them back
+  assert.deepEqual(plain.cardOrder, ['anthropic', 'supergrok', 'antigravity', 'zai']);
+  assert.deepEqual(plain.stars.antigravity, ['metric:Gemini (Session)', 'metric:Gemini (Weekly)']);
+  assert.equal(plain.collapsed.antigravity, true);
+  assert.deepEqual(plain.rows.antigravity, mine.rows['antigravity@abc123']);
+  assert.equal(plain.stars['antigravity@abc123'], undefined, 'moved, not copied');
+  assert.deepEqual(again.cardOrder, mine.cardOrder);
+  assert.deepEqual(again.stars, mine.stars);
+  assert.deepEqual(again.collapsed, mine.collapsed);
+  assert.deepEqual(again.rows, mine.rows);
+  assert.deepEqual(again.hidden, { zai: true });
+}
+
+{
+  // ARRANGE: a provider missing from one payload — switched off, or failing to list
+  const mine = {
+    ...emptyLayout(),
+    cardOrder: ['openai', 'anthropic', 'zai'],
+    hidden: { zai: true },
+    stars: { openai: ['metric:Codex weekly'], zai: [] },
+  };
+
+  // ACT
+  const without = syncLayout(mine, ['anthropic', 'openai']);
+  const back = syncLayout(without, ['anthropic', 'openai', 'zai']);
+
+  // ASSERT: its place, stars (even "off the menu bar") and flags wait for it
+  assert.deepEqual(without.cardOrder, ['openai', 'anthropic', 'zai']);
+  assert.deepEqual(back.cardOrder, ['openai', 'anthropic', 'zai']);
+  assert.deepEqual(back.hidden, { zai: true });
+  assert.deepEqual(back.stars.zai, []);
+}
+
+{
+  // ARRANGE: two accounts on screen at once, each with its own settings
+  const mine = {
+    ...emptyLayout(),
+    cardOrder: ['antigravity@a', 'anthropic', 'antigravity@b'],
+    stars: { 'antigravity@a': ['metric:Gemini (Session)'], 'antigravity@b': ['metric:Gemini (Weekly)'] },
+  };
+
+  // ACT: both present, then a third account appears beside them
+  const both = syncLayout(mine, ['antigravity@a', 'anthropic', 'antigravity@b', 'antigravity@c']);
+
+  // ASSERT: a present sibling is never taken over; the newcomer starts at the end
+  assert.deepEqual(both.cardOrder, ['antigravity@a', 'anthropic', 'antigravity@b', 'antigravity@c']);
+  assert.deepEqual(both.stars['antigravity@a'], ['metric:Gemini (Session)']);
+  assert.deepEqual(both.stars['antigravity@b'], ['metric:Gemini (Weekly)']);
+  assert.equal(both.stars['antigravity@c'], undefined);
+}
+
+{
+  // ARRANGE: two saved accounts are both absent when the provider's plain id appears
+  const mine = {
+    ...emptyLayout(),
+    cardOrder: ['antigravity@a', 'anthropic', 'antigravity@b'],
+    stars: { 'antigravity@a': ['metric:Gemini (Session)'], 'antigravity@b': ['metric:Gemini (Weekly)'] },
+  };
+
+  // ACT
+  const plain = syncLayout(mine, ['anthropic', 'antigravity']);
+
+  // ASSERT: there is no safe account to inherit from, so neither account's
+  // preferences are moved onto the provider-wide card.
+  assert.deepEqual(plain.cardOrder, ['antigravity@a', 'anthropic', 'antigravity@b', 'antigravity']);
+  assert.deepEqual(plain.stars, mine.stars);
+  assert.equal(plain.stars.antigravity, undefined);
 }
 
 {
@@ -1973,4 +2161,52 @@ console.log('ok');
   assert.equal(accountSwitchFor('anthropic@two', payload.accounts).preparing, true);
   assert.equal(accountSwitchFor('anthropic@one', payload.accounts).busy, true);
   assert.equal(accountSwitchFor('anthropic@one', payload.accounts).active, true);
+}
+
+// --- provider catalog (Settings → Providers) ---------------------------------
+{
+  const payload = parseHostPayload(JSON.stringify({
+    entries: [{ id: 'custom:mine', brand: 'opencode-go', display_name: 'Mine', sections: [] }],
+    providers_error: 'Could not write',
+    providers: [
+      { id: 'cursor', name: 'Cursor', enabled: false, configured: true, env: '', sign_in: 'Sign in to the Cursor app, then Refresh.', action: 'app', add_accounts: ['codex', 'bogus'] },
+      { id: 'zai', name: 'Z.AI', enabled: true, configured: false, env: 'ZAI_API_KEY', sign_in: 'Add an API key', action: 'settings' },
+      { id: 'kiro', name: 'Kiro', enabled: true, configured: true, action: 'rm -rf' },
+      { id: '', name: 'nameless' },
+      'junk',
+    ],
+  }));
+  assert.deepEqual(payload.providers.map((p) => p.id), ['cursor', 'zai', 'kiro']);
+  assert.equal(payload.providers[2].action, '', 'unknown actions are dropped');
+  assert.deepEqual(payload.providers[0].addAccounts, ['codex']);
+  assert.deepEqual(payload.providers[1].addAccounts, []);
+  assert.equal(payload.providersError, 'Could not write');
+  assert.deepEqual(payload.providers.map(providerState), ['off-ready', 'needs', 'ready']);
+  assert.equal(providerState({ enabled: false, configured: false }), 'off');
+  assert.deepEqual(parseHostPayload('{}').providers, []);
+  // A custom provider that declares a brand draws that brand's mark.
+  assert.equal(projectCards(payload, 0, 'en')[0].icon, 'opencode-go');
+}
+
+// --- capped text rows become meters --------------------------------------------
+{
+  const payload = parseHostPayload(JSON.stringify({ entries: [{ id: 'cursor', sections: [
+    { type: 'text', label: 'On-Demand', value: '$12.00 / $10.00', used_cents: 1200, limit_cents: 1000, percent: 120, severity: 'critical' },
+    { type: 'text', label: 'Plan', value: 'Pro' },
+  ] }] }));
+  const [meter, plain] = payload.entries[0].sections;
+  assert.equal(meter.type, 'metric');
+  assert.equal(meter.percent, 100);
+  assert.equal(meter.headline, 'value');
+  assert.equal(meter.value, '$12.00 / $10.00');
+  assert.equal(meter.severity, 'critical');
+  assert.equal(plain.type, 'text');
+}
+
+// --- stale cards know how old their payload is -------------------------------------
+{
+  const payload = parseHostPayload(JSON.stringify({ entries: [{ id: 'zai', stale: true, fetched_at: '2026-10-16T12:00:00Z', sections: [] }, { id: 'kiro', fetched_at: null, sections: [] }] }));
+  const [stale, fresh] = projectCards(payload, 0, 'en');
+  assert.equal(stale.fetchedAt, Date.parse('2026-10-16T12:00:00Z'));
+  assert.equal(fresh.fetchedAt, 0);
 }

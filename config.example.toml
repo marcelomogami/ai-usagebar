@@ -11,7 +11,7 @@
 # Valid: anthropic | anthropic_api | openai | copilot | zai | openrouter | deepseek
 #        | kimi | kilo | novita | moonshot | grok | supergrok | grokbot | antigravity
 #        | cursor | minimax | kiro | nous | opencode-go | commandcode | ollama
-#        | orcarouter | modelstudio | lyceum | devin | cline | muse-code
+#        | orcarouter | modelstudio | lyceum | devin | cline | muse-code | synthetic
 # When unset, the TUI opens on the Overview (all vendors at once); set this to
 # open directly on a vendor's tab instead.
 # primary = "anthropic"
@@ -56,11 +56,13 @@
 # used = "/requests/used"        # used + limit → "used of limit" under the bar...
 # limit = "/requests/limit"
 # # percent = "/requests/pct"    # ...or a ready-made percentage instead of both
+# # currency = "USD"             # optional 3-letter uppercase code; formats both as money
 # resets_at = "/requests/reset"  # RFC 3339 string, or epoch seconds / milliseconds
 # window_secs = 3600             # window length for pacing (>= 60)
 # [[custom.texts]]               # a free-text row
 # label = "Tier"
 # value = "/account/tier"        # string, number or boolean
+# # currency = "USD"             # optional 3-letter uppercase code; numeric values only
 #
 # Muse Code subscription quota is now a native provider: see [muse-code]
 # below and docs/muse-code.md. Legacy custom counters may retain id = "muse"
@@ -74,7 +76,7 @@
 # Command and Option keys are accepted as Cmd/Command and Option, and shown as
 # Cmd/Option.
 # shortcut = "Ctrl+Shift+U"
-# How often the tray re-reads every provider: 1, 5 or 10 minutes; the panel's
+# How often the tray re-reads every provider: 1, 5, 10, 15, 30 or 60 minutes; the panel's
 # Refresh button is always immediate.
 # refresh_minutes = 5
 # New releases: auto (download, verify and restart unattended) | notify
@@ -397,6 +399,13 @@ api_key_env = "NOVITA_API_KEY"     # checked first; if set + non-empty, used
 # display_limit = 200              # tank size in USD; see the group note above
 # headline = "amount"              # "amount" | "percent"
 
+[synthetic]
+# Disabled by default. Reads the documented subscription request quota from
+# https://api.synthetic.new/v2/quotas.
+enabled = false
+api_key_env = "SYNTHETIC_API_KEY"
+# api_key = "..."                  # fallback; chmod 600 the file if used
+
 [lyceum]
 # Disabled by default; this reads only the credits endpoint, not inference.
 enabled = false
@@ -496,8 +505,13 @@ enabled = false
 [antigravity]
 enabled = false
 # With no local product — or when `agy` cannot supply its CSRF token — quota
-# comes from Google's Cloud Code API using the session Antigravity saved in the
-# OS keyring or in `~/.gemini/antigravity-cli/antigravity-oauth-token`.
+# comes from `agy` itself when it is installed (`agy -p "/quota"`, at most every
+# two minutes), and otherwise from Google's Cloud Code API using the session
+# Antigravity saved in the OS keyring or in
+# `~/.gemini/antigravity-cli/antigravity-oauth-token`.
+# By default `agy` is discovered on PATH and in ~/.local/bin. Pin the exact
+# executable when the refresh process must not trust the ambient PATH:
+# agy_binary = "~/.local/bin/agy"
 # Renewing that session needs Antigravity's own OAuth client (a public
 # installed-app client; it is not shipped in source). Without it the fallback
 # works only while the saved access token lasts (about an hour after the CLI

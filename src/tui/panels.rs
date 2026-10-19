@@ -72,6 +72,11 @@ pub(crate) struct SectionProjection {
     /// row beneath a heading instead of a peer of the overall meter. The TUI
     /// renders grouped metrics like any other; only the report carries this.
     pub group: Option<&'static str>,
+    /// A per-model quota pool (Antigravity's "Gemini 4 Argon"): the limit of
+    /// one model, not one of the windows every model of the provider shares.
+    /// A frontend that sums the provider up in one figure ranks it below
+    /// those, so an exhausted model does not read as an exhausted provider.
+    pub model_pool: bool,
     /// Which of the metric's two numbers a report-driven frontend puts on the
     /// bar. Every metric is a percentage unless its vendor says otherwise, so
     /// this is [`MetricHeadline::Percent`] by default — the bar draws it and
@@ -98,6 +103,7 @@ impl SectionBuilder {
             reset_at: None,
             window: None,
             group: None,
+            model_pool: false,
             headline: MetricHeadline::Percent,
             used_cents: None,
             limit_cents: None,
@@ -177,6 +183,13 @@ impl SectionBuilder {
         let mut row = Self::projection(section);
         row.group = Some(group);
         self.0.push(row);
+    }
+    /// Mark the metric just pushed as a per-model quota pool; see
+    /// [`SectionProjection::model_pool`].
+    fn mark_model_pool(&mut self) {
+        let row = self.0.last_mut().expect("a metric was just pushed");
+        assert!(matches!(row.section, Section::Metric { .. }));
+        row.model_pool = true;
     }
 
     /// Cursor's prepaid on-demand row. `value` stays the formatted pair the
@@ -356,6 +369,10 @@ pub fn compact_cells(snapshot: &VendorSnapshot) -> (String, Vec<(String, PaceSev
         }
         VendorSnapshot::Kilo(s) => (String::new(), vec![usd_cell(s.balance)]),
         VendorSnapshot::Novita(s) => (String::new(), vec![usd_cell(s.available)]),
+        VendorSnapshot::Synthetic(s) => (
+            String::new(),
+            vec![pct("subscription", s.subscription.utilization_pct)],
+        ),
         VendorSnapshot::Lyceum(s) => (
             String::new(),
             vec![(usd(s.available_credits), PaceSeverity::Low)],
@@ -533,6 +550,7 @@ pub fn headline_pct(snapshot: &VendorSnapshot) -> Option<i32> {
         ]
         .into_iter()
         .flatten()
+        .chain(s.model_pools.iter().map(|p| p.window.utilization_pct))
         .max(),
         VendorSnapshot::Cursor(s) => (!s.unlimited).then_some(s.total_pct),
         VendorSnapshot::Minimax(s) => Some(s.session.utilization_pct.max(s.weekly.utilization_pct)),
@@ -550,6 +568,7 @@ pub fn headline_pct(snapshot: &VendorSnapshot) -> Option<i32> {
             .flatten()
             .map(|window| window.utilization_pct)
             .max(),
+        VendorSnapshot::Synthetic(s) => Some(s.subscription.utilization_pct),
         VendorSnapshot::OpenCodeGo(s) => [
             s.rolling
                 .as_ref()
@@ -663,6 +682,7 @@ pub(crate) fn sections_with_metadata_for(
                 VendorSnapshot::Kimi(s) => kimi_sections(s, now, pace_tolerance),
                 VendorSnapshot::Kilo(s) => kilo_sections(s, prefs),
                 VendorSnapshot::Novita(s) => novita_sections(s, prefs),
+                VendorSnapshot::Synthetic(s) => synthetic_sections(s, now, pace_tolerance),
                 VendorSnapshot::Lyceum(s) => lyceum_sections(s),
                 VendorSnapshot::Moonshot(s) => moonshot_sections(s, prefs),
                 VendorSnapshot::Grok(s) => grok_sections(s, prefs),
@@ -790,7 +810,7 @@ fn anthropic_api_sections(s: &crate::usage::AnthropicApiSnapshot) -> SectionBuil
             let p = pct.clamp(0, 100) as u16;
             v.push_metric(
                 Section::Metric {
-                    label: "Spend (mo)".into(),
+                    label: s.coverage_label(),
                     pct: p,
                     severity: severity_for(pct),
                     value_label: format!("{} of ${:.0}", usd(s.spent), limit),
@@ -801,7 +821,7 @@ fn anthropic_api_sections(s: &crate::usage::AnthropicApiSnapshot) -> SectionBuil
         }
         _ => {
             v.push(Section::Text {
-                label: "Spend (mo)".into(),
+                label: s.coverage_label(),
                 value: usd(s.spent),
             });
         }
@@ -809,7 +829,7 @@ fn anthropic_api_sections(s: &crate::usage::AnthropicApiSnapshot) -> SectionBuil
     v.push(Section::Spacer);
     v.push(Section::Text {
         label: "".into(),
-        value: "Month-to-date cost via the Admin usage API.".into(),
+        value: "Only completed daily buckets from the Admin usage API.".into(),
     });
     v.push(Section::Text {
         label: "".into(),
@@ -853,13 +873,17 @@ fn anthropic_sections(
         // An uncapped plan (`monthly_limit: null`) has spend but no
         // denominator: show the amount alone rather than "of $0.00" or a
         // percentage nobody can vouch for (#30).
-        let (value_label, footnote) = match e.fmt_limit() {
+        let (value_label, mut footnote) = match e.fmt_limit() {
             Some(l) => (
                 format!("{} of {}", e.fmt_spent(), l),
                 format!("{pct}% of monthly limit consumed"),
             ),
             None => (e.fmt_spent(), "no monthly limit reported".to_string()),
         };
+        if let Some(note) = e.status_note() {
+            footnote.push_str(" · ");
+            footnote.push_str(note);
+        }
         v.push_metric(
             Section::Metric {
                 label: "Extra usage".into(),
@@ -1143,28 +1167,22 @@ fn orcarouter_sections(s: &crate::usage::OrcaRouterSnapshot, now: DateTime<Utc>)
 
 /// Antigravity holds two independent pools (Gemini, Claude & GPT OSS), each
 /// with a 5-hour and a weekly window. Grouped by window type so the two pools
-/// sit side by side, matching the GNOME dropdown.
+/// sit side by side, matching the GNOME dropdown. A per-model pool (Pro's
+/// "Gemini 4 Argon") joins them under the heading of its cadence, in the order
+/// `antigravity::vendor::rows` sets.
 fn antigravity_sections(
     s: &crate::usage::AntigravitySnapshot,
     now: DateTime<Utc>,
 ) -> SectionBuilder {
-    use crate::antigravity::vendor::{GROUP_PRIMARY, GROUP_THIRD_PARTY};
-
     let mut v = SectionBuilder::new(vec![Section::Title {
         left: s.plan.clone(),
         right: None,
     }]);
-    for (heading, primary, third_party) in [
-        (
-            "Session",
-            s.session.as_ref(),
-            s.third_party_session.as_ref(),
-        ),
-        ("Weekly", s.weekly.as_ref(), s.third_party_weekly.as_ref()),
-    ] {
+    for (heading, weekly) in [("Session", false), ("Weekly", true)] {
+        let rows = crate::antigravity::vendor::rows(s, weekly);
         // A cadence no bucket reported gets no heading either — an empty
         // "Session" with nothing under it reads as a failed fetch.
-        if primary.is_none() && third_party.is_none() {
+        if rows.is_empty() {
             continue;
         }
         v.push(Section::Spacer);
@@ -1172,11 +1190,11 @@ fn antigravity_sections(
             label: heading.into(),
             value: String::new(),
         });
-        if let Some(w) = primary {
-            push_window(&mut v, GROUP_PRIMARY, w, now, 5, false);
-        }
-        if let Some(w) = third_party {
-            push_window(&mut v, GROUP_THIRD_PARTY, w, now, 5, false);
+        for row in rows {
+            push_window(&mut v, row.label, row.window, now, 5, false);
+            if row.model_pool {
+                v.mark_model_pool();
+            }
         }
     }
     // Figures read from the Cloud Code API fallback can lag what the local
@@ -1336,7 +1354,7 @@ fn nous_sections(
         let (label, value_label, footnote) = match headline {
             MetricHeadline::Value => (
                 "Credits remaining".into(),
-                format!("{:.2}", balance.unwrap_or_default()),
+                usd(balance.unwrap_or_default()),
                 "usable now".into(),
             ),
             MetricHeadline::Percent => ("Usage".into(), format!("{pct}%"), "current period".into()),
@@ -1357,19 +1375,19 @@ fn nous_sections(
     if let Some(remaining) = s.credits_remaining {
         sections.push(Section::Text {
             label: "Subscription credits".into(),
-            value: format!("{remaining:.2} remaining"),
+            value: format!("{} remaining", usd(remaining)),
         });
     }
     if let Some(purchased) = s.purchased_credits_remaining {
         sections.push(Section::Text {
             label: "Top-up credits".into(),
-            value: format!("{purchased:.2} remaining"),
+            value: format!("{} remaining", usd(purchased)),
         });
     }
     if let Some(total_usable) = s.total_usable_credits {
         sections.push(Section::Text {
             label: "Total usable credits".into(),
-            value: format!("{total_usable:.2}"),
+            value: usd(total_usable),
         });
     }
     if let Some(period_end) = s.current_period_end {
@@ -1654,6 +1672,30 @@ fn novita_sections(s: &crate::usage::NovitaSnapshot, prefs: DisplayPrefs) -> Sec
         });
     }
     v
+}
+
+fn synthetic_sections(
+    s: &crate::usage::SyntheticSnapshot,
+    now: DateTime<Utc>,
+    tolerance: u32,
+) -> SectionBuilder {
+    let mut sections = SectionBuilder::new(vec![Section::Title {
+        left: "Synthetic".into(),
+        right: None,
+    }]);
+    push_window(
+        &mut sections,
+        "Subscription quota",
+        &s.subscription,
+        now,
+        tolerance,
+        false,
+    );
+    sections.push(Section::Text {
+        label: "Requests".into(),
+        value: format!("{} / {}", s.requests, s.limit),
+    });
+    sections
 }
 
 fn lyceum_sections(s: &crate::usage::LyceumSnapshot) -> SectionBuilder {
@@ -2580,10 +2622,31 @@ mod tests {
                 pct, value_label, ..
             } => {
                 assert_eq!(*pct, 100);
-                assert_eq!(value_label, "12.93");
+                assert_eq!(value_label, "$12.93");
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn nous_sections_render_credit_rows_as_usd() {
+        let sections = sections_with_metadata_for(
+            &ready(VendorSnapshot::NousResearch(nous_snapshot())),
+            now(),
+            5,
+        );
+        assert!(sections.iter().any(|s| matches!(
+            &s.section,
+            Section::Text { label, value } if label == "Subscription credits" && value == "$0.00 remaining"
+        )));
+        assert!(sections.iter().any(|s| matches!(
+            &s.section,
+            Section::Text { label, value } if label == "Top-up credits" && value == "$12.93 remaining"
+        )));
+        assert!(sections.iter().any(|s| matches!(
+            &s.section,
+            Section::Text { label, value } if label == "Total usable credits" && value == "$12.93"
+        )));
     }
 
     /// Only a rolling window has a length a frontend can pace against. The
@@ -2790,6 +2853,7 @@ mod tests {
                 spent: Cents(250),
                 currency: None,
                 decimal_places: Some(2),
+                status: crate::usage::ExtraUsageStatus::Active,
             }),
             reset_credits: Default::default(),
         };
@@ -2834,6 +2898,7 @@ mod tests {
                 spent: Cents(14157),
                 currency: Some("BRL".into()),
                 decimal_places: Some(2),
+                status: crate::usage::ExtraUsageStatus::OutOfCredits,
             }),
             reset_credits: Default::default(),
         };
@@ -2859,7 +2924,7 @@ mod tests {
             "no denominator to show: {}",
             extra.1
         );
-        assert_eq!(extra.2, "no monthly limit reported");
+        assert_eq!(extra.2, "no monthly limit reported · out of credits");
     }
 
     #[test]
@@ -4345,7 +4410,39 @@ mod tests {
             weekly: None,
             third_party_session: None,
             third_party_weekly: None,
+            model_pools: Vec::new(),
         })
+    }
+
+    /// A per-model pool is a row of its own under the heading of its cadence,
+    /// and that heading appears even when no shared window of the cadence did.
+    #[test]
+    fn antigravity_model_pool_gets_its_own_row_under_its_cadence() {
+        let VendorSnapshot::Antigravity(mut snap) =
+            antigravity_snap(crate::usage::AntigravitySource::Local)
+        else {
+            unreachable!()
+        };
+        snap.model_pools.push(crate::usage::ModelPoolWindow {
+            name: "Gemini 4 Argon".into(),
+            window: UsageWindow {
+                utilization_pct: 60,
+                resets_at: Some(now() + chrono::Duration::days(3)),
+                window_duration: chrono::Duration::days(7),
+            },
+        });
+        let sections = sections_for(&ready(VendorSnapshot::Antigravity(snap)), now(), 5);
+        let weekly = sections
+            .iter()
+            .position(|s| matches!(s, Section::Text { label, .. } if label == "Weekly"))
+            .expect("Weekly heading");
+        let argon = sections
+            .iter()
+            .position(|s| {
+                matches!(s, Section::Metric { label, pct: 60, .. } if label == "Gemini 4 Argon")
+            })
+            .expect("Argon row");
+        assert!(argon > weekly);
     }
 
     /// Figures read off the API while nothing runs say so; a running product's
@@ -4374,16 +4471,15 @@ mod tests {
                 .any(|s| matches!(s, Section::Text { label, .. } if label == "Source"))
         );
 
-        let statusline = sections_for(
-            &ready(antigravity_snap(AntigravitySource::Statusline)),
-            now(),
-            5,
-        );
-        assert!(
-            !statusline
-                .iter()
-                .any(|s| matches!(s, Section::Text { label, .. } if label == "Source"))
-        );
+        for source in [AntigravitySource::Statusline, AntigravitySource::Agy] {
+            let sections = sections_for(&ready(antigravity_snap(source)), now(), 5);
+            assert!(
+                !sections
+                    .iter()
+                    .any(|s| matches!(s, Section::Text { label, .. } if label == "Source")),
+                "{source:?}"
+            );
+        }
     }
 
     /// A custom provider's rows come out in declaration order: title, gauges,

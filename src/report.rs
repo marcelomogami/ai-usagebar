@@ -153,6 +153,13 @@ enum ReportSection {
         /// Absent for metrics that stand on their own.
         #[serde(skip_serializing_if = "Option::is_none")]
         group: Option<String>,
+        /// A per-model quota pool rather than one of the provider's shared
+        /// windows (Antigravity's "Gemini 4 Argon"): a frontend that shows one
+        /// figure for the provider ranks it below the shared windows, so an
+        /// exhausted model does not read as an exhausted provider. Present
+        /// only when true.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        model_pool: bool,
     },
     Text {
         label: String,
@@ -171,6 +178,9 @@ enum ReportSection {
         /// Present only together with a positive cap.
         #[serde(skip_serializing_if = "Option::is_none")]
         percent: Option<u16>,
+        /// Bar colour for `percent`, on the same scale as a metric's.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        severity: Option<String>,
     },
     Block {
         label: String,
@@ -429,8 +439,10 @@ fn entry_from_state(tab: &TabId, state: &TabState, now: chrono::DateTime<Utc>) -
                     reset_at: projected.reset_at,
                     window_secs: projected
                         .window
-                        .map(|window| window.num_seconds().max(0) as u64),
+                        .filter(|window| window.num_seconds() > 0)
+                        .map(|window| window.num_seconds() as u64),
                     group: projected.group.map(str::to_string),
+                    model_pool: projected.model_pool,
                 });
             }
             Section::Text { label, value } => {
@@ -443,12 +455,18 @@ fn entry_from_state(tab: &TabId, state: &TabState, now: chrono::DateTime<Utc>) -
                     (Some(used), Some(limit)) => consumed_percent(used, limit),
                     _ => None,
                 };
+                let severity = percent.map(|percent| {
+                    crate::pango::severity_for(i32::from(percent))
+                        .as_str()
+                        .to_string()
+                });
                 entry.sections.push(ReportSection::Text {
                     label,
                     value,
                     used_cents,
                     limit_cents,
                     percent,
+                    severity,
                 });
             }
             Section::Block { label, body } => {
@@ -654,6 +672,7 @@ fn apply_session_activity(entries: &mut [Entry], scanned: Vec<(usize, SessionAct
             used_cents: None,
             limit_cents: None,
             percent: None,
+            severity: None,
         });
     }
 }
@@ -682,6 +701,7 @@ fn context_session_sections(scan: &ContextScan) -> Vec<ReportSection> {
             used_cents: None,
             limit_cents: None,
             percent: None,
+            severity: None,
         });
     }
     sections
@@ -742,6 +762,7 @@ fn session_section(session: &ContextSession) -> ReportSection {
         reset_at: None,
         window_secs: None,
         group: Some(SESSIONS_GROUP.into()),
+        model_pool: false,
     }
 }
 
@@ -897,6 +918,7 @@ fn json_rows(entries: &[Entry]) -> Vec<serde_json::Value> {
                         reset_at,
                         window_secs,
                         group,
+                        model_pool,
                     } => {
                         let mut metric = json!({
                             "label": label,
@@ -913,6 +935,9 @@ fn json_rows(entries: &[Entry]) -> Vec<serde_json::Value> {
                         }
                         if let Some(group) = group {
                             metric["group"] = json!(group);
+                        }
+                        if *model_pool {
+                            metric["model_pool"] = json!(true);
                         }
                         Some(metric)
                     }
@@ -1038,7 +1063,7 @@ mod tests {
     use crate::usage::{
         CursorCreditGrant, CursorSnapshot, DeepseekSnapshot, KimiSnapshot, KiroSnapshot,
         OpenAiSnapshot, OpenAiSource, OpenRouterSnapshot, ResetCredit, ResetCredits,
-        SuperGrokPeriod, SuperGrokSnapshot, VendorSnapshot,
+        SuperGrokPeriod, SuperGrokSnapshot, SyntheticSnapshot, UsageWindow, VendorSnapshot,
     };
     use crate::vendor::VendorId;
 
@@ -1071,6 +1096,7 @@ mod tests {
             reset_at: None,
             window_secs: None,
             group: None,
+            model_pool: false,
         }
     }
 
@@ -1088,6 +1114,7 @@ mod tests {
                 weekly: None,
                 third_party_session: None,
                 third_party_weekly: None,
+                model_pools: Vec::new(),
             },
         }
     }
@@ -1183,6 +1210,50 @@ mod tests {
         let json = render_json_entries(&[entry]);
         assert!(!json.contains("account0@example.com"));
         assert!(json.contains("a***@example.com"));
+    }
+
+    /// #453: a per-model pool's row says so, in `sections` and in the
+    /// `metrics` view alike; a shared window carries no such field at all.
+    #[test]
+    fn usage_json_marks_only_the_model_pool_row() {
+        let tab = TabId::vendor(VendorId::Antigravity);
+        let mut account = antigravity_account(0);
+        let window = |utilization_pct, window_duration| crate::usage::UsageWindow {
+            utilization_pct,
+            resets_at: Some(Utc::now() + chrono::Duration::hours(2)),
+            window_duration,
+        };
+        let week = chrono::Duration::days(7);
+        account.snapshot.session = Some(window(55, chrono::Duration::hours(5)));
+        account.snapshot.weekly = Some(window(39, week));
+        account
+            .snapshot
+            .model_pools
+            .push(crate::usage::ModelPoolWindow {
+                name: "Gemini 4 Argon".into(),
+                window: window(100, week),
+            });
+        let entry = entry_from_antigravity_account(&tab, &account, Utc::now());
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json_entries(&[entry])).unwrap();
+
+        let entry = &value["entries"][0];
+        let metrics: Vec<&serde_json::Value> = entry["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|section| section["type"] == "metric")
+            .chain(entry["metrics"].as_array().unwrap())
+            .collect();
+        assert_eq!(metrics.len(), 6);
+        for metric in metrics {
+            let pool = metric["label"] == "Gemini 4 Argon";
+            assert_eq!(
+                metric.get("model_pool"),
+                pool.then_some(&serde_json::Value::Bool(true)),
+                "{metric}"
+            );
+        }
     }
 
     #[test]
@@ -1501,6 +1572,37 @@ mod tests {
         // must not be handed a length to pace against.
         assert!(first["metrics"][0]["window_secs"].is_null());
         assert!(first["sections"][1].get("window_secs").is_none());
+    }
+
+    #[test]
+    fn non_positive_cycle_omits_window_secs_from_report() {
+        let fetched_at = Utc::now() - chrono::Duration::minutes(1);
+        let reset_at = Utc::now() + chrono::Duration::days(14);
+        for duration in [chrono::Duration::zero(), chrono::Duration::seconds(-1)] {
+            let state = TabState::Ready(Box::new(ReadyTab {
+                snapshot: VendorSnapshot::Synthetic(SyntheticSnapshot {
+                    subscription: UsageWindow {
+                        utilization_pct: 35,
+                        resets_at: Some(reset_at),
+                        window_duration: duration,
+                    },
+                    requests: 350.0,
+                    limit: 1000.0,
+                }),
+                stale: false,
+                last_error: None,
+                fetched_at: Some(fetched_at),
+                display: Default::default(),
+            }));
+            let projected =
+                entry_from_state(&TabId::vendor(VendorId::Synthetic), &state, Utc::now());
+            let rendered = render_json_for_primary(&[projected], None);
+            let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            let first = &value["entries"][0];
+
+            assert!(first["metrics"][0]["window_secs"].is_null());
+            assert!(first["sections"][1].get("window_secs").is_none());
+        }
     }
 
     // --- #255: Claude CLI sessions as grouped report rows ----------------------
@@ -2224,6 +2326,7 @@ mod tests {
                         used_cents: None,
                         limit_cents: None,
                         percent: None,
+                        severity: None,
                     },
                     ReportSection::Block {
                         label: "Usage by period".into(),
@@ -2331,6 +2434,7 @@ mod tests {
                 used_cents: None,
                 limit_cents: None,
                 percent: None,
+                severity: None,
             } if label == "Balance" && value == "$12.50"
         )));
         assert!(
@@ -2388,7 +2492,8 @@ mod tests {
                 used_cents: Some(125),
                 limit_cents: Some(500),
                 percent: Some(25),
-            } if label == "On-Demand" && value == "$1.25 / $5.00"
+                severity: Some(severity),
+            } if label == "On-Demand" && value == "$1.25 / $5.00" && severity == "low"
         )));
         let rendered = render_json_for_primary(std::slice::from_ref(&projected), None);
         let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();

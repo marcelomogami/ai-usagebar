@@ -56,6 +56,7 @@ pub struct Config {
     pub kimi: KimiConfig,
     pub kilo: KiloConfig,
     pub novita: NovitaConfig,
+    pub synthetic: SyntheticConfig,
     pub moonshot: MoonshotConfig,
     pub grok: GrokConfig,
     pub supergrok: SuperGrokConfig,
@@ -114,7 +115,7 @@ pub struct TrayConfig {
     /// Global shortcut that toggles the popover, in the canonical
     /// "Ctrl+Shift+U" spelling. `None` → no shortcut registered.
     pub shortcut: Option<String>,
-    /// How often the tray re-reads every provider, in minutes: 1, 5 or 10.
+    /// How often the tray re-reads every provider, in minutes: 1, 5, 10, 15, 30 or 60.
     /// The footer's Refresh is always immediate. `None` → 5.
     pub refresh_minutes: Option<u64>,
     /// What the tray does when a newer release is published.
@@ -129,7 +130,7 @@ pub struct TrayConfig {
 
 /// Poll intervals the tray offers, in minutes. The provider cache TTL is
 /// 60 s regardless; this only decides how often the tray asks.
-pub const TRAY_REFRESH_MINUTES: [u64; 3] = [1, 5, 10];
+pub const TRAY_REFRESH_MINUTES: [u64; 6] = [1, 5, 10, 15, 30, 60];
 const DEFAULT_TRAY_REFRESH_MINUTES: u64 = 5;
 
 /// Quota-threshold desktop notifications. On by default at 97%: the bar's
@@ -1617,6 +1618,24 @@ impl Default for NovitaConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
+pub struct SyntheticConfig {
+    pub enabled: bool,
+    pub api_key_env: String,
+    pub api_key: Option<String>,
+}
+
+impl Default for SyntheticConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key_env: "SYNTHETIC_API_KEY".into(),
+            api_key: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct LyceumConfig {
     pub enabled: bool,
     pub accounts: Vec<ApiKeyAccount>,
@@ -1820,6 +1839,9 @@ fn default_grok_binary() -> PathBuf {
 #[serde(default)]
 pub struct AntigravityConfig {
     pub enabled: bool,
+    /// Exact `agy` executable to run for quota and saved-session renewal.
+    /// Unset preserves discovery on `PATH` and in `~/.local/bin`.
+    pub agy_binary: Option<PathBuf>,
     /// OAuth client id used to refresh the keyring session.
     pub oauth_client_id: Option<String>,
     /// OAuth client secret paired with `oauth_client_id`. An
@@ -1837,6 +1859,7 @@ impl Default for AntigravityConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            agy_binary: None,
             oauth_client_id: None,
             oauth_client_secret: None,
             ide_language_server: true,
@@ -2019,6 +2042,8 @@ pub struct CustomMetricSpec {
     pub resets_at: Option<String>,
     /// Window length for pacing, at least 60.
     pub window_secs: Option<u64>,
+    /// Three-letter uppercase currency code used to format `used` and `limit` as money.
+    pub currency: Option<String>,
 }
 
 /// One free-text row: a string, number, or boolean at `value`.
@@ -2027,6 +2052,8 @@ pub struct CustomMetricSpec {
 pub struct CustomTextSpec {
     pub label: String,
     pub value: String,
+    /// Three-letter uppercase currency code used to format numeric values as money.
+    pub currency: Option<String>,
 }
 
 impl CustomProviderConfig {
@@ -2176,6 +2203,15 @@ impl CustomProviderConfig {
                     metric.label
                 )));
             }
+            if metric.currency.is_some() && metric.percent.is_some() {
+                return Err(bad(format!(
+                    "metric {:?} cannot combine `currency` with `percent`",
+                    metric.label
+                )));
+            }
+            if let Some(currency) = &metric.currency {
+                validate_currency(&section, &format!("metric {:?}", metric.label), currency)?;
+            }
             for (field, pointer) in [
                 ("used", &metric.used),
                 ("limit", &metric.limit),
@@ -2202,6 +2238,9 @@ impl CustomProviderConfig {
                 return Err(bad(format!("duplicate text label {:?}", text.label)));
             }
             validate_pointer(&section, "value", &text.value)?;
+            if let Some(currency) = &text.currency {
+                validate_currency(&section, &format!("text {:?}", text.label), currency)?;
+            }
         }
         Ok(())
     }
@@ -2238,6 +2277,15 @@ fn validate_custom_label(section: &str, field: &str, label: &str) -> Result<()> 
     Ok(())
 }
 
+fn validate_currency(section: &str, context: &str, currency: &str) -> Result<()> {
+    if currency.len() != 3 || !currency.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err(AppError::Other(format!(
+            "{section}: {context} currency {currency:?} must be a 3-letter uppercase code (e.g. \"USD\")"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_header_name(section: &str, field: &str, name: &str) -> Result<()> {
     if name.is_empty() || reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
         return Err(AppError::Other(format!(
@@ -2265,8 +2313,16 @@ pub fn resolve_api_key(
 /// an absent API key is a legitimate state rather than an error — Kimi accepts
 /// a Kimi Code CLI subscription login instead.
 pub fn optional_api_key(env_var_name: &str, inline: Option<&str>) -> Option<String> {
+    optional_api_key_with(env_var_name, inline, |name| std::env::var(name).ok())
+}
+
+fn optional_api_key_with(
+    env_var_name: &str,
+    inline: Option<&str>,
+    environment: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
     if is_valid_env_var_name(env_var_name)
-        && let Ok(v) = std::env::var(env_var_name)
+        && let Some(v) = environment(env_var_name)
         && !v.is_empty()
     {
         return Some(v);
@@ -2351,6 +2407,7 @@ impl Config {
         expand_tilde_opt(&mut self.anthropic.desktop_profiles_dir);
         expand_tilde_opt(&mut self.anthropic.desktop_prepare_binary);
         expand_tilde_opt(&mut self.openai.codex_auth_path);
+        expand_tilde_opt(&mut self.antigravity.agy_binary);
         expand_tilde_opt(&mut self.cursor.db_path);
         expand_tilde_opt(&mut self.cursor.agent_auth_path);
         expand_tilde_opt(&mut self.kiro.db_path);
@@ -2394,6 +2451,7 @@ impl Config {
             self.kimi.api_key.as_deref(),
             self.kilo.api_key.as_deref(),
             self.novita.api_key.as_deref(),
+            self.synthetic.api_key.as_deref(),
             self.minimax.api_key.as_deref(),
             self.moonshot.api_key.as_deref(),
             self.grok.api_key.as_deref(),
@@ -2490,6 +2548,7 @@ impl Config {
             VendorId::Kimi => self.kimi.enabled,
             VendorId::Kilo => self.kilo.enabled,
             VendorId::Novita => self.novita.enabled,
+            VendorId::Synthetic => self.synthetic.enabled,
             VendorId::Moonshot => self.moonshot.enabled,
             VendorId::Grok => self.grok.enabled,
             VendorId::Supergrok => self.supergrok.enabled,
@@ -2527,6 +2586,7 @@ impl Config {
             VendorId::Kimi => &self.kimi.api_key_env,
             VendorId::Kilo => &self.kilo.api_key_env,
             VendorId::Novita => &self.novita.api_key_env,
+            VendorId::Synthetic => &self.synthetic.api_key_env,
             VendorId::Moonshot => &self.moonshot.api_key_env,
             VendorId::Grok => &self.grok.api_key_env,
             VendorId::Minimax => &self.minimax.api_key_env,
@@ -2566,6 +2626,7 @@ impl Config {
             VendorId::Kimi => self.kimi.api_key.as_deref(),
             VendorId::Kilo => self.kilo.api_key.as_deref(),
             VendorId::Novita => self.novita.api_key.as_deref(),
+            VendorId::Synthetic => self.synthetic.api_key.as_deref(),
             VendorId::Moonshot => self.moonshot.api_key.as_deref(),
             VendorId::Grok => self.grok.api_key.as_deref(),
             VendorId::Minimax => self.minimax.api_key.as_deref(),
@@ -2735,7 +2796,7 @@ impl Config {
             && !TRAY_REFRESH_MINUTES.contains(&minutes)
         {
             return Err(AppError::Other(format!(
-                "[tray] refresh_minutes must be one of 1, 5 or 10, got {minutes}"
+                "[tray] refresh_minutes must be one of 1, 5, 10, 15, 30 or 60, got {minutes}"
             )));
         }
         if !(1..=100).contains(&self.notifications.threshold) {
@@ -2809,6 +2870,16 @@ impl Config {
         if self.supergrok.grok_binary.as_os_str().is_empty() {
             return Err(AppError::Other(
                 "[supergrok] grok_binary must not be empty".into(),
+            ));
+        }
+        if self
+            .antigravity
+            .agy_binary
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(AppError::Other(
+                "[antigravity] agy_binary must not be empty".into(),
             ));
         }
         let mut labels = HashSet::new();
@@ -3303,6 +3374,35 @@ ide_language_server = false
         assert!(!opted_out.antigravity.ide_language_server);
     }
 
+    #[test]
+    fn antigravity_agy_binary_is_optional_and_tilde_expanded() {
+        assert!(Config::default().antigravity.agy_binary.is_none());
+        let file = write_toml(
+            r#"
+            [antigravity]
+            enabled = true
+            agy_binary = "~/bin/agy"
+            "#,
+        );
+        let config = Config::load_from(file.path()).unwrap();
+        assert_eq!(
+            config.antigravity.agy_binary,
+            Some(crate::cache::home_dir().unwrap().join("bin/agy"))
+        );
+    }
+
+    #[test]
+    fn antigravity_agy_binary_must_not_be_empty() {
+        let file = write_toml(
+            r#"
+            [antigravity]
+            agy_binary = ""
+            "#,
+        );
+        let error = Config::load_from(file.path()).unwrap_err().to_string();
+        assert!(error.contains("[antigravity] agy_binary must not be empty"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn antigravity_inline_oauth_secret_receives_config_file_protection() {
@@ -3784,12 +3884,26 @@ api_key = "synthetic-account"
         );
         assert_eq!(optional_api_key("9INVALID", None), None);
         assert_eq!(optional_api_key("9INVALID", Some("")), None);
-        // An unusable `api_key_env` still lets an inline key through, exactly
-        // as `resolve_api_key` does.
+    }
+
+    #[test]
+    fn optional_api_key_prefers_env_and_falls_through_to_inline() {
+        let from_env = |name: &str| (name == "TEST_API_KEY").then(|| "from-env".to_string());
         assert_eq!(
-            optional_api_key("9INVALID", Some("inline")),
-            Some("inline".to_string())
+            optional_api_key_with("TEST_API_KEY", Some("from-config"), from_env),
+            Some("from-env".to_string())
         );
+        assert_eq!(
+            optional_api_key_with("TEST_API_KEY", Some("from-config"), |_| None),
+            Some("from-config".to_string())
+        );
+        assert_eq!(
+            optional_api_key_with("TEST_API_KEY", Some("from-config"), |_| {
+                Some(String::new())
+            }),
+            Some("from-config".to_string())
+        );
+        assert_eq!(optional_api_key_with("TEST_API_KEY", None, |_| None), None);
     }
 
     #[test]
@@ -5432,11 +5546,13 @@ value = "/tier"
         assert_eq!(c.metrics[0].used.as_deref(), Some("/requests/used"));
         assert_eq!(c.metrics[0].limit.as_deref(), Some("/requests/limit"));
         assert_eq!(c.metrics[0].percent, None);
+        assert_eq!(c.metrics[0].currency, None);
         assert_eq!(c.metrics[0].resets_at.as_deref(), Some("/requests/reset"));
         assert_eq!(c.metrics[0].window_secs, Some(3600));
         assert_eq!(c.texts.len(), 1);
         assert_eq!(c.texts[0].label, "Tier");
         assert_eq!(c.texts[0].value, "/tier");
+        assert_eq!(c.texts[0].currency, None);
         assert_eq!(c.section_label(), r#"[[custom]] id = "mytool""#);
     }
 
@@ -5764,6 +5880,60 @@ url = "https://example.test/u"
     }
 
     #[test]
+    fn custom_metric_and_text_parse_currency() {
+        let toml = custom_with(
+            "window_secs = 3600\n",
+            "window_secs = 3600\ncurrency = \"USD\"\n",
+        )
+        .replace(
+            "value = \"/tier\"\n",
+            "value = \"/tier\"\ncurrency = \"EUR\"\n",
+        );
+        let config = Config::load_from(write_toml(&toml).path()).unwrap();
+        assert_eq!(config.custom[0].metrics[0].currency.as_deref(), Some("USD"));
+        assert_eq!(config.custom[0].texts[0].currency.as_deref(), Some("EUR"));
+    }
+
+    #[test]
+    fn custom_rejects_an_invalid_currency_code() {
+        let toml = custom_with(
+            "window_secs = 3600\n",
+            "window_secs = 3600\ncurrency = \"usd\"\n",
+        );
+        assert_custom_rejected(
+            &toml,
+            "metric \"Requests\" currency \"usd\" must be a 3-letter uppercase code",
+        );
+
+        let toml = custom_with(
+            "value = \"/tier\"\n",
+            "value = \"/tier\"\ncurrency = \"USDT\"\n",
+        );
+        assert_custom_rejected(
+            &toml,
+            "text \"Tier\" currency \"USDT\" must be a 3-letter uppercase code",
+        );
+    }
+
+    #[test]
+    fn custom_rejects_a_metric_mixing_currency_with_percent() {
+        let toml = r#"
+            [[custom]]
+            id = "bare"
+            short_name = "bre"
+            url = "https://example.test/u"
+            [[custom.metrics]]
+            label = "Quota"
+            percent = "/pct"
+            currency = "USD"
+        "#;
+        assert_custom_rejected(
+            toml,
+            "metric \"Quota\" cannot combine `currency` with `percent`",
+        );
+    }
+
+    #[test]
     fn enabled_custom_and_custom_by_id_select_entries() {
         let two = format!(
             "{}{}",
@@ -5964,11 +6134,11 @@ enabled = true
 
     #[test]
     fn tray_refresh_minutes_rejects_values_outside_the_menu() {
-        for minutes in ["3", "0"] {
+        for minutes in ["3", "0", "120"] {
             let file = write_toml(&format!("[tray]\nrefresh_minutes = {minutes}\n"));
             let error = Config::load_from(file.path()).unwrap_err().to_string();
             assert!(error.contains("[tray] refresh_minutes"), "{error}");
-            assert!(error.contains("1, 5 or 10"), "{error}");
+            assert!(error.contains("1, 5, 10, 15, 30 or 60"), "{error}");
         }
     }
 
