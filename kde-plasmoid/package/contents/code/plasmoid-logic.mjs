@@ -487,7 +487,19 @@ export function visibleEntry(entry, hiddenByProvider) {
         sections.push(section);
     });
     closeBlock();
-    return {...entry, sections: sections};
+    // QML's V4 engine does not parse object spread (`{...entry}`), even
+    // though Node and qmllint accept it. Keep this explicit so the whole
+    // plasmoid module remains loadable by plasmashell.
+    return {
+        id: entry.id,
+        label: entry.label,
+        plan: entry.plan,
+        status: entry.status,
+        stale: entry.stale,
+        error: entry.error,
+        fetchedAt: entry.fetchedAt,
+        sections: sections,
+    };
 }
 
 export function metricChoices(entry, hiddenByProvider) {
