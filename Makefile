@@ -102,7 +102,9 @@ qml-lint:
 	@test -x "$(QMLLINT)" || { echo "Qt 6 qmllint not found" >&2; exit 1; }
 	@"$(QMLLINT)" --version 2>&1 | grep -Eq '(^|[[:space:]])6\.' || \
 	  { echo "$(QMLLINT) is not Qt 6 qmllint" >&2; exit 1; }
-	"$(QMLLINT)" --unqualified disable \
+	PYTHONDONTWRITEBYTECODE=1 python3 kde-plasmoid/qmllint_gate_test.py
+	PYTHONDONTWRITEBYTECODE=1 python3 kde-plasmoid/qmllint_gate.py "$(QMLLINT)" \
+	  kde-plasmoid/package/contents/config/main.xml \
 	  kde-plasmoid/package/contents/config/*.qml \
 	  kde-plasmoid/package/contents/ui/*.qml
 
