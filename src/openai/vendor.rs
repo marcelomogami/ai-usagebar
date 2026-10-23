@@ -52,7 +52,8 @@ pub fn build_placeholders(
         .and_then(|c| c.approx_cloud_messages)
         .map(|(a, b)| format!("{a}-{b}"))
         .unwrap_or_default();
-    let reset_summary = reset_credits(&snap.reset_credits);
+    let resets = snap.reset_credits.clone().unwrap_or_default();
+    let reset_summary = reset_credits(&resets);
 
     placeholders(vec![
         ("icon", "󱢆".to_string()),
@@ -82,10 +83,7 @@ pub fn build_placeholders(
         ("oai_credit_balance", credit_balance),
         ("oai_local_msgs", local_msgs),
         ("oai_cloud_msgs", cloud_msgs),
-        (
-            "oai_resets_available",
-            snap.reset_credits.available.to_string(),
-        ),
+        ("oai_resets_available", resets.available.to_string()),
         ("oai_resets", reset_summary),
         (
             "oai_extra_limits",
@@ -212,12 +210,21 @@ fn render_tooltip(
 
     if let Some(session) = snap.session.as_ref() {
         push_window(&mut lines, "  󰔟  Codex 5h", session, theme, now, None);
+    } else if snap.weekly.is_some() {
+        lines.push(TooltipLine::Body(format!(
+            " <span foreground='{dim}'>  Codex 5h — Not reported</span>"
+        )));
     }
     if let Some(weekly) = snap.weekly.as_ref() {
         if snap.session.is_some() {
             lines.push(TooltipLine::Body("".into()));
         }
         push_window(&mut lines, "  󰃰  Codex weekly", weekly, theme, now, None);
+    } else if snap.session.is_some() {
+        lines.push(TooltipLine::Body("".into()));
+        lines.push(TooltipLine::Body(format!(
+            " <span foreground='{dim}'>  Codex weekly — Not reported</span>"
+        )));
     }
     if snap.session.is_none() && snap.weekly.is_none() {
         lines.push(TooltipLine::Body(format!(
@@ -308,13 +315,13 @@ fn render_tooltip(
         }
     }
 
-    if snap.reset_credits.available > 0 {
+    if let Some(resets) = &snap.reset_credits {
         lines.push(TooltipLine::Body("".into()));
         lines.push(TooltipLine::Sep);
         lines.push(TooltipLine::Body(format!(
             " <span foreground='{fg}'>  󰁯  Reset credits</span>"
         )));
-        for line in reset_credit_lines(&snap.reset_credits, now) {
+        for line in reset_credit_lines(resets, now) {
             lines.push(TooltipLine::Body(format!(
                 " <span foreground='{dim}'>     {}</span>",
                 escape(&line)
@@ -449,14 +456,14 @@ mod tests {
     }
 
     #[test]
-    fn weekly_only_snapshot_uses_weekly_default_and_hides_session() {
+    fn weekly_only_snapshot_uses_weekly_default_and_marks_session_unreported() {
         let mut s = sample();
         s.session = None;
         s.weekly.as_mut().unwrap().utilization_pct = 66;
         let out = render(&oc(s.clone()), &s, &Theme::default(), &opts(), Utc::now());
         assert!(out.text.contains("66%"));
         assert!(out.tooltip.contains("Codex weekly"));
-        assert!(!out.tooltip.contains("Codex 5h"));
+        assert!(out.tooltip.contains("Codex 5h — Not reported"));
 
         let values = build_placeholders(&s, &opts(), Utc::now());
         assert_eq!(values["oai_session_pct"], "");
@@ -479,13 +486,13 @@ mod tests {
     }
 
     #[test]
-    fn session_only_snapshot_renders_default_with_weekly_placeholders_empty() {
+    fn session_only_snapshot_marks_weekly_unreported_and_keeps_placeholders_empty() {
         let mut s = sample();
         s.weekly = None;
         let out = render(&oc(s.clone()), &s, &Theme::default(), &opts(), Utc::now());
         assert!(out.text.contains("1%"));
         assert!(out.tooltip.contains("Codex 5h"));
-        assert!(!out.tooltip.contains("Codex weekly"));
+        assert!(out.tooltip.contains("Codex weekly — Not reported"));
 
         let values = build_placeholders(&s, &opts(), Utc::now());
         assert_eq!(values["oai_session_pct"], "1");
@@ -519,7 +526,7 @@ mod tests {
         assert!(!quiet.tooltip.contains("available"), "{}", quiet.tooltip);
 
         let mut s = s;
-        s.reset_credits = crate::usage::ResetCredits {
+        s.reset_credits = Some(crate::usage::ResetCredits {
             available: 2,
             credits: vec![
                 crate::usage::ResetCredit {
@@ -533,7 +540,7 @@ mod tests {
                     ),
                 },
             ],
-        };
+        });
         let out = render(&oc(s.clone()), &s, &Theme::default(), &opts(), Utc::now());
         assert!(out.tooltip.contains("Reset credits"), "{}", out.tooltip);
         assert_eq!(
@@ -546,6 +553,19 @@ mod tests {
         let values = build_placeholders(&s, &opts(), Utc::now());
         assert_eq!(values["oai_resets_available"], "2");
         assert_eq!(values["oai_resets"], "2 resets available");
+    }
+
+    #[test]
+    fn tooltip_says_none_available_when_the_response_states_zero_resets() {
+        let mut s = sample();
+        s.reset_credits = Some(crate::usage::ResetCredits::default());
+        let out = render(&oc(s.clone()), &s, &Theme::default(), &opts(), Utc::now());
+        assert!(out.tooltip.contains("Reset credits"), "{}", out.tooltip);
+        assert!(out.tooltip.contains("None available"), "{}", out.tooltip);
+
+        let values = build_placeholders(&s, &opts(), Utc::now());
+        assert_eq!(values["oai_resets_available"], "0");
+        assert_eq!(values["oai_resets"], "0 resets available");
     }
 
     #[test]
