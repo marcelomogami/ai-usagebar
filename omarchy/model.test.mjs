@@ -2,6 +2,23 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
+function qmlBlocks(source, component) {
+  const blocks = [];
+  const start = new RegExp(`(^|\\n)\\s*${component}\\s*\\{`, 'g');
+  for (const match of source.matchAll(start)) {
+    const open = source.indexOf('{', match.index);
+    let depth = 0;
+    for (let i = open; i < source.length; i++) {
+      if (source[i] === '{') depth++;
+      else if (source[i] === '}' && --depth === 0) {
+        blocks.push(source.slice(open + 1, i));
+        break;
+      }
+    }
+  }
+  return blocks;
+}
+
 const source = fs.readFileSync(new URL('./Model.js', import.meta.url), 'utf8');
 const model = {};
 vm.createContext(model);
@@ -169,6 +186,64 @@ assert.match(i18n.formatReset(nextDayReset, dayBeforeMs, 'ko'), /^1일 2시간 �
 assert.match(i18n.formatReset(nextDayReset, dayBeforeMs, 'es'), /^Se reinicia en 1d 2h · 3 oct 14:00$/);
 assert.match(i18n.formatReset(resetAt, nowMs, 'ru'), /^Сброс через /);
 assert.match(i18n.formatReset(resetAt, nowMs, 'pt-BR'), /^Redefine em /);
+// Refill-style windows name the amount they regenerate instead of "Resets".
+assert.equal(i18n.formatReset(resetAt, nowMs, 'en', '2%'), 'Regenerates 2% in 4h 0m · 12:00');
+assert.match(i18n.formatReset(resetAt, nowMs, 'ru', '2%'), /^Восстановление 2% через /);
+assert.match(i18n.formatReset(resetAt, nowMs, 'pt-BR', '2%'), /^Regenera 2% em /);
+assert.match(i18n.formatReset(resetAt, nowMs, 'ko', '2%'), /^4시간 0분 후 2% 재생성 · /);
+assert.match(i18n.formatReset(resetAt, nowMs, 'es', '2%'), /^Regenera 2% en /);
+assert.equal(model.formatReset(resetAt, nowMs, '2%'), 'Regenerates 2% in 4h 0m · 12:00');
+assert.equal(model.formatReset(resetAt, nowMs), 'Resets in 4h 0m · 12:00');
+
+// Decimal-precise percentages print with at most one decimal; the rounded
+// integer remains the fallback for older reports.
+assert.equal(model.percentText(30, 'left', 29.52), '70.5%');
+assert.equal(model.percentText(30, 'used', 29.52), '29.5%');
+assert.equal(model.percentText(30, 'left'), '70%');
+assert.equal(model.percentText(30, 'used', null), '30%');
+assert.equal(model.percentText(70, undefined, 70), '70%');
+// Objects built inside the vm live in another realm — copy fields out before
+// comparing (same reason the locale catalogs are copied above).
+var leftView = model.metricValueView({percent: 30, value: '30%', percent_precise: 29.52}, 'left');
+assert.equal(leftView.text, '70.5%');
+assert.equal(leftView.left, true);
+assert.equal(leftView.percent, 70.5);
+var leftIntView = model.metricValueView({percent: 30, value: '30%'}, 'left');
+assert.equal(leftIntView.text, '70%');
+assert.equal(leftIntView.percent, 70);
+// The used reading echoes the report's value string, which the binary
+// already prints at the vendor's decimal precision.
+assert.equal(
+  model.metricValueView({percent: 30, value: '29.5%', percent_precise: 29.52}, 'used').text,
+  '29.5%',
+);
+// An older report that only carries whole numbers keeps showing them.
+assert.equal(
+  model.metricValueView({percent: 30, value: '30%', percent_precise: null}, 'used').text,
+  '30%',
+);
+// A refill-style metric carries reading "left": it reads as a fuel gauge
+// whatever the widget's global setting, and other metrics follow the setting.
+assert.equal(model.metricShowAs({reading: 'left'}, 'used'), 'left');
+assert.equal(model.metricShowAs({reading: ''}, 'left'), 'left');
+assert.equal(model.metricShowAs({}, 'used'), 'used');
+var refill = model.metricValueView({percent: 30, value: '30%', reading: 'left'}, 'used');
+assert.equal(refill.text, '70%');
+assert.equal(refill.left, true);
+var refillPrecise = model.metricValueView(
+  {percent: 30, value: '29.5%', percent_precise: 29.52, reading: 'left'},
+  'used',
+);
+assert.equal(refillPrecise.text, '70.5%');
+assert.equal(refillPrecise.left, true);
+assert.equal(
+  model.metricDetail({detail: 'Regenerates 2% in 3h 4m', reset_at: resetAt, regen: '2%'}),
+  '',
+);
+assert.equal(
+  model.metricDetail({detail: 'Regenerates 0.6 credits in 3h 4m · extra note', reset_at: resetAt}),
+  'extra note',
+);
 assert.equal(i18n.formatUpdated('', nowMs, 'pt-BR'), i18n.t('pt-BR', 'updated.unavailable'));
 assert.equal(i18n.formatUpdated(new Date(nowMs - 30_000).toISOString(), nowMs, 'ru'),
   i18n.t('ru', 'updated.just_now'));
@@ -595,6 +670,8 @@ assert.equal(model.brandIconFile({id: 'grokbot'}), 'grokbot.svg');
 assert.equal(model.brandIconFile({id: 'copilot'}), 'copilot.svg');
 assert.equal(model.brandIconFile({id: 'devin'}), 'devin.svg');
 assert.equal(model.brandIconFile({id: 'devin@work'}), 'devin.svg');
+assert.equal(model.brandIconFile({id: 'synthetic'}), 'synthetic.svg');
+assert.equal(model.brandIconFile({id: 'synthetic', brand: 'synthetic'}), 'synthetic.svg');
 assert.equal(model.brandIconFile({id: 'custom:devin', brand: 'devin'}), 'devin.svg');
 const devinMark = fs.readFileSync(new URL('./icons/devin.svg', import.meta.url), 'utf8');
 assert.match(devinMark, /viewBox="0 0 24 24"/);
@@ -604,6 +681,13 @@ assert.match(devinMark, /<path\s/);
 assert.match(devinMark, /<svg\b[^>]*\bfill="#ffffff"/);
 assert.doesNotMatch(devinMark, /\bfill="(?:#000(?:000)?|black)"/i);
 assert.doesNotMatch(devinMark, /<(?:script|image|foreignObject|use)\b|\bhref\s*=|\bon\w+\s*=/i);
+assert.equal(model.brandIconFile({id: 'droid'}), 'droid.svg');
+const droidMark = fs.readFileSync(new URL('./icons/droid.svg', import.meta.url), 'utf8');
+assert.match(droidMark, /viewBox="0 0 24 24"/);
+assert.match(droidMark, /<path\s/);
+assert.match(droidMark, /<svg\b[^>]*\bfill="#ffffff"/);
+assert.doesNotMatch(droidMark, /\bfill="(?:#000(?:000)?|black)"/i);
+assert.doesNotMatch(droidMark, /<(?:script|image|foreignObject|use)\b|\bhref\s*=|\bon\w+\s*=/i);
 assert.equal(model.brandIconFile({id: 'zai'}), 'zhipu.svg');
 assert.equal(model.brandIconFile({id: 'kimi'}), 'kimi.svg');
 assert.equal(model.brandIconFile({id: 'opencode-go'}), 'opencode.svg');
@@ -651,7 +735,7 @@ assert.equal(model.brandIconFile({id: 'anthropic', brand: 'openai'}), 'openai.sv
 const slugs = [
   'anthropic', 'anthropic_api', 'openai', 'copilot', 'zai', 'openrouter',
   'deepseek', 'kimi', 'kilo', 'novita', 'moonshot', 'grok', 'supergrok', 'grokbot',
-  'antigravity', 'cursor', 'minimax', 'kiro', 'nous', 'opencode-go', 'lyceum', 'commandcode', 'devin', 'ollama', 'muse-code'
+  'antigravity', 'cursor', 'minimax', 'kiro', 'nous', 'opencode-go', 'lyceum', 'commandcode', 'devin', 'ollama', 'muse-code', 'droid'
 ];
 const byMark = {};
 for (const slug of slugs) {
@@ -2064,6 +2148,29 @@ assert.equal(model.cursorPoolOf(null), '');
   }
   assert.doesNotMatch(settingsForm, /providersOpen|credentialsOpen/);
   assert.doesNotMatch(settingsForm, /^    PanelSectionHeader \{\s*\n\s*text: root\.tr\("section\.(display|language|bar_window|show_as|primary|providers|credentials)"\)/m);
+
+  // Keyboard reachability is a product contract, not a visual convention.
+  // Any new action button must opt into the Quattro tab/focus behavior, while
+  // the one custom pointer target (Disclosure) must keep equivalent keyboard
+  // activation and visibly claim focus on click.
+  const buttons = qmlBlocks(settingsForm, 'Button');
+  assert.equal(buttons.length, 5, 'all settings action buttons are covered');
+  for (const button of buttons)
+    assert.match(button, /\bfocusable:\s*true\b/, 'every settings Button is in the tab order');
+  const panelActionButtons = qmlBlocks(settingsForm, 'PanelActionButton');
+  assert.equal(panelActionButtons.length, 1, 'the credential clear action is covered');
+  assert.match(panelActionButtons[0], /\bfocusable:\s*true\b/);
+  assert.match(panelActionButtons[0], /\btooltipText:/, 'the icon-only action retains an accessible label');
+  const disclosures = qmlBlocks(settingsForm, 'component Disclosure: Item');
+  assert.equal(disclosures.length, 1);
+  assert.match(disclosures[0], /activeFocusOnTab:\s*true/);
+  for (const key of ['Return', 'Enter', 'Space'])
+    assert.match(disclosures[0], new RegExp(`Keys\\.on${key}Pressed:\\s*disclosure\\.toggled\\(\\)`));
+  assert.match(disclosures[0], /onClicked:\s*\{\s*disclosure\.forceActiveFocus\(\)\s*disclosure\.toggled\(\)/);
+  assert.equal(qmlBlocks(settingsForm, 'MouseArea').length, 1,
+    'new custom pointer targets need explicit keyboard-equivalence coverage');
+  assert.match(settingsForm, /focus:\s*visible/);
+  assert.match(settingsForm, /Keys\.onEscapePressed:\s*closeRequested\(\)/);
   assert.match(panel, /labelOnly:\s*chip\.labelOnly/);
   assert.match(panel, /if \(showProvider \|\| chip\.labelOnly === true\)/);
   assert.match(barWidgetSource, /visible:\s*chipHit\.chip\.labelOnly !== true/);
@@ -2112,6 +2219,17 @@ assert.equal(model.cursorPoolOf(null), '');
   assert.deepEqual(ids(model.barVisibleEntries(entries,saved.hiddenBarEntries)),['openai','openai@work']);
   assert.equal(model.providerDisplaySummary(entries),'3/3');
   assert.equal(model.providerDisplaySummary([{...entries[0],checked:false},entries[1],entries[2]]),'2/3');
+  const bar = [{id:'a'},{id:'b'},{id:'c'}];
+  assert.equal(model.adjacentBarEntryId(bar, 'a', 1), 'b');
+  assert.equal(model.adjacentBarEntryId(bar, 'b', -1), 'a');
+  assert.equal(model.adjacentBarEntryId(bar, 'c', 1), 'a');
+  assert.equal(model.adjacentBarEntryId(bar, 'a', -1), 'c');
+  // The bar is showing `a` while the panel selection is a hidden entry.
+  assert.equal(model.adjacentBarEntryId(bar, 'hidden', 1), 'b');
+  assert.equal(model.adjacentBarEntryId(bar, 'hidden', -1), 'c');
+  assert.equal(model.adjacentBarEntryId([], 'a', 1), '');
+  assert.equal(model.adjacentBarEntryId(bar, 'a', 0), '');
+  assert.equal(model.adjacentBarEntryId(null, 'a', 1), '');
 
 }
 
@@ -2124,6 +2242,12 @@ assert.equal(model.cursorPoolOf(null), '');
   assert.match(form, /badge: root\.vendorSummary\(\)/, 'fetching retains its independent enabled count');
   assert.match(form, /property bool fetchingOpen: false/);
   assert.match(form, /onClicked: root\.barProviderToggleRequested\(modelData.id\)/);
+  assert.match(panel, /function selectAdjacentBarEntry\(delta\)/);
+  assert.match(panel, /Model\.adjacentBarEntryId\(barEntries, selectedEntryId, delta\)/);
+  assert.match(panel, /selectEntry\(root\.entryIndex \+ dx\)/, 'panel keys still walk every tab');
+  assert.match(barWidgetSource, /function nextEntry\(\) \{\n\s*if \(panelItem\) panelItem\.selectAdjacentBarEntry\(1\)/);
+  assert.match(barWidgetSource, /selectAdjacentBarEntry\(delta < 0 \? 1 : -1\)/);
+  assert.doesNotMatch(barWidgetSource, /selectEntry\(/);
   const chips=model.barChips([],null,true,true,true,false,false,false,'auto','used',true);
   assert.equal(chips.length,1,'all hidden retains a generic clickable icon');
   assert.equal(chips[0].label,'');
@@ -2141,6 +2265,28 @@ assert.equal(model.cursorPoolOf(null), '');
   assert.equal(single[0].id,'openai@work','single-entry mode falls back when the selected panel entry is hidden');
   const prefs=JSON.parse(JSON.stringify({hiddenBarEntries:['custom:sample']}));
   assert.deepEqual(Array.from(model.barVisibleEntries(reports,prefs.hiddenBarEntries),entry=>entry.id),['openai@work']);
+}
+
+// Qt 6.12 added a QtQuick type named Color, and it wins over the qs.Commons
+// singleton of the same name wherever a bare `Color` is written. Every bare
+// read then resolves to that type instead: `Color.foreground` is undefined, and
+// a `color` property assigned undefined paints as #000000. The theme file
+// lookup is worse, because `Color.currentThemePath` is undefined too and the
+// path becomes "file://undefined/colors.toml", so the theme never loads.
+//
+// Qualifying the singleton is the form Omarchy's own plugin documentation
+// asks for, and it reads the same on every Qt version.
+{
+  for (const file of ['Panel.qml', 'BarWidget.qml', 'BrandMark.qml', 'SettingsView.qml']) {
+    const source = fs.readFileSync(new URL(`./${file}`, import.meta.url), 'utf8');
+    assert.match(source, /^import qs\.Commons as Commons$/m, `${file} imports the palette with an alias`);
+    assert.doesNotMatch(source, /(^|[^.\w])Color\.[a-zA-Z]/, `${file} has no bare Color. reference`);
+  }
+  // The theme watcher binds to the palette's own signals, so its target has to
+  // be the qualified singleton too.
+  const panelSource = fs.readFileSync(new URL('./Panel.qml', import.meta.url), 'utf8');
+  assert.match(panelSource, /target:\s*Commons\.Color/);
+  assert.doesNotMatch(panelSource, /target:\s*Color\s*$/m);
 }
 
 console.log('Omarchy model tests passed');

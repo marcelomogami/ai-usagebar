@@ -3,6 +3,7 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 import "I18n.js" as I18n
@@ -18,10 +19,10 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.45)
-  readonly property color track: Style.selectedFillFor(foreground, Color.accent)
+  readonly property color track: Style.selectedFillFor(foreground, Commons.Color.accent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool vertical: bar ? bar.vertical : false
 
@@ -178,7 +179,7 @@ Panel {
 
   FileView {
     id: themeColorsFile
-    path: Color.currentThemePath + "/colors.toml"
+    path: Commons.Color.currentThemePath + "/colors.toml"
     watchChanges: true
     printErrors: false
     onLoaded: root.applyThemePalette(text())
@@ -187,7 +188,7 @@ Panel {
   }
 
   Connections {
-    target: Color
+    target: Commons.Color
     function onUrgentChanged() { themeColorsFile.reload() }
     function onAccentChanged() { themeColorsFile.reload() }
     function onForegroundChanged() { themeColorsFile.reload() }
@@ -478,6 +479,25 @@ Panel {
     persistSelection(selectedEntryId)
     if (providerList.visible) providerList.forceLayout()
     if (panelFlick) panelFlick.contentY = 0
+  }
+
+  // Wheel and middle-click belong to the bar, so they step through the
+  // entries the bar is showing. The panel's left/right keys still walk every
+  // tab, including a provider hidden from the bar. With nothing left on the
+  // bar, the gesture keeps walking the panel.
+  function selectAdjacentBarEntry(delta) {
+    if (!delta || visibleEntries.length === 0) return
+    if (barEntries.length === 0) {
+      selectEntry(entryIndex + delta)
+      return
+    }
+    var id = Model.adjacentBarEntryId(barEntries, selectedEntryId, delta)
+    for (var i = 0; i < visibleEntries.length; i++) {
+      if (visibleEntries[i].id === id) {
+        selectEntry(i)
+        return
+      }
+    }
   }
 
   // A bar chip stands for one entry when the bar shows several: select it,
@@ -1338,8 +1358,8 @@ Panel {
       : metricRow.ragColor
     readonly property int indent: grouped ? Style.space(10) : 0
     readonly property string detailText: I18n.displayDetail(root.uiLocale, Model.metricDetail(row))
-    readonly property string resetText: row ? I18n.formatReset(row.reset_at, root.nowMs, root.uiLocale) : ""
-    readonly property int shownPercent: row ? Model.shownPercent(row.percent, root.showAs) : 0
+    readonly property string resetText: row ? I18n.formatReset(row.reset_at, root.nowMs, root.uiLocale, row.regen) : ""
+    readonly property int shownPercent: row ? Model.shownPercent(row.percent, Model.metricShowAs(row, root.showAs)) : 0
     readonly property var valueView: Model.metricValueView(row, root.showAs)
     readonly property string valueText: valueView.left
       ? I18n.t(root.uiLocale, "metric.left", { percent: valueView.percent })

@@ -74,6 +74,7 @@ pub struct Config {
     pub modelstudio: ModelStudioConfig,
     pub lyceum: LyceumConfig,
     pub devin: DevinConfig,
+    pub droid: DroidConfig,
     #[serde(rename = "muse-code")]
     pub muse: MuseConfig,
     /// Quota-threshold desktop notifications (`[notifications]`).
@@ -675,7 +676,7 @@ pub(crate) fn set_bool(
     let table = doc
         .entry(section)
         .or_insert_with(toml_edit::table)
-        .as_table_mut()
+        .as_table_like_mut()
         .ok_or_else(|| AppError::Other(format!("config.toml: [{section}] is not a table")))?;
 
     if let Some(item) = table.get_mut(key)
@@ -710,7 +711,7 @@ pub(crate) fn set_value(
     let table = doc
         .entry(section)
         .or_insert_with(toml_edit::table)
-        .as_table_mut()
+        .as_table_like_mut()
         .ok_or_else(|| AppError::Other(format!("config.toml: [{section}] is not a table")))?;
 
     let Some(mut new_value) = new_value else {
@@ -1302,9 +1303,24 @@ pub struct MuseConfig {
     pub credentials_path: Option<PathBuf>,
 }
 
-/// Devin CLI quota — reuses its existing credentials file read-only. The
-/// provider is opt-in and stores only a path override in ai-usagebar config.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+/// One named Devin account.
+///
+/// ```toml
+/// [[devin.accounts]]
+/// label = "work"
+/// credentials_path = "~/.zapdevin/devin/credentials.toml"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DevinAccount {
+    /// Stable name used on the CLI (`--account <label>`) and as the cache
+    /// subdir (`~/.cache/ai-usagebar/devin/<label>`).
+    pub label: String,
+    /// Devin CLI credentials file for this account.
+    pub credentials_path: PathBuf,
+}
+
+/// Devin CLI quota — reuses its existing credentials file read-only.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DevinConfig {
     pub enabled: bool,
@@ -1312,6 +1328,60 @@ pub struct DevinConfig {
     /// `%APPDATA%\devin\credentials.toml` on Windows and
     /// `${XDG_DATA_HOME:-~/.local/share}/devin/credentials.toml` elsewhere.
     pub credentials_path: Option<PathBuf>,
+    /// Extra Devin logins, each its own `credentials.toml`.
+    #[serde(default)]
+    pub accounts: Vec<DevinAccount>,
+    /// Whether the default (unnamed) Devin login gets its own tab. Defaults to
+    /// `true`. Set `false` once every login is a named account. Ignored when
+    /// there are no named accounts, so Devin never loses its only tab.
+    pub show_default_account: bool,
+}
+
+impl Default for DevinConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            credentials_path: None,
+            accounts: Vec::new(),
+            show_default_account: true,
+        }
+    }
+}
+
+impl DevinConfig {
+    /// The credentials file for `label`, or the default path when `label` is
+    /// `None`.
+    pub fn resolve_credentials_path(&self, label: Option<&str>) -> Result<PathBuf> {
+        let Some(label) = label else {
+            return crate::devin::credentials_path(self);
+        };
+        self.accounts
+            .iter()
+            .find(|account| account.label == label)
+            .map(|account| account.credentials_path.clone())
+            .ok_or_else(|| {
+                AppError::Credentials(format!(
+                    "no Devin account named {label:?}. Add it under \
+                     [[devin.accounts]], or drop --account to use the default login."
+                ))
+            })
+    }
+}
+
+/// Factory Droid (`droid` CLI) quota — reuses the login the CLI keeps in the
+/// Linux Secret Service keyring, read-only. The provider is opt-in and takes
+/// no key: it only reads the CLI's documented `~/.factory` store.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DroidConfig {
+    pub enabled: bool,
+    /// When the login is about to expire, run `droid doctor --checks auth`
+    /// so the CLI renews it itself (at most every 15 minutes). Off by
+    /// default — renewal is opt-in; an expired login is left to the user,
+    /// who runs `droid` once.
+    pub cli_renewal: bool,
+    /// The `droid` executable for that renewal; `droid` on `PATH` by default.
+    pub cli_path: Option<PathBuf>,
 }
 
 impl Default for OpenCodeGoConfig {
@@ -1623,6 +1693,9 @@ pub struct SyntheticConfig {
     pub enabled: bool,
     pub api_key_env: String,
     pub api_key: Option<String>,
+    /// Optional plan tier label (go/standard/big) — display-only. The
+    /// quotas API carries no tier identifier, so the label is manual.
+    pub plan_tier: Option<String>,
 }
 
 impl Default for SyntheticConfig {
@@ -1631,6 +1704,7 @@ impl Default for SyntheticConfig {
             enabled: false,
             api_key_env: "SYNTHETIC_API_KEY".into(),
             api_key: None,
+            plan_tier: None,
         }
     }
 }
@@ -2432,11 +2506,20 @@ impl Config {
         for account in &mut self.openai.accounts {
             account.codex_auth_path = expand_tilde(&account.codex_auth_path);
         }
+        for account in &mut self.devin.accounts {
+            account.credentials_path = expand_tilde(&account.credentials_path);
+        }
         if let Some(paths) = &mut self.commandcode.auth_paths {
             for path in paths {
                 *path = expand_tilde(path);
             }
         }
+        if let Some(paths) = &mut self.opencode_go.auth_paths {
+            for path in paths {
+                *path = expand_tilde(path);
+            }
+        }
+        expand_tilde_opt(&mut self.droid.cli_path);
     }
 
     /// Explicitly enumerate every inline credential field. Adding a new
@@ -2567,6 +2650,7 @@ impl Config {
             VendorId::ModelStudio => self.modelstudio.enabled,
             VendorId::Lyceum => self.lyceum.enabled,
             VendorId::Devin => self.devin.enabled,
+            VendorId::Droid => self.droid.enabled,
             VendorId::MuseCode => self.muse.enabled,
         }
     }
@@ -2610,7 +2694,8 @@ impl Config {
             | VendorId::CommandCode
             | VendorId::ModelStudio
             | VendorId::Devin
-            | VendorId::MuseCode => id.api_key_env(),
+            | VendorId::MuseCode
+            | VendorId::Droid => id.api_key_env(),
         }
     }
 
@@ -2648,7 +2733,8 @@ impl Config {
             | VendorId::CommandCode
             | VendorId::ModelStudio
             | VendorId::Devin
-            | VendorId::MuseCode => None,
+            | VendorId::MuseCode
+            | VendorId::Droid => None,
         };
         raw.filter(|key| !key.is_empty())
     }
@@ -2899,6 +2985,16 @@ impl Config {
             if !openai_labels.insert(&account.label) {
                 return Err(AppError::Credentials(format!(
                     "duplicate openai account label {:?}",
+                    account.label
+                )));
+            }
+        }
+        let mut devin_labels = HashSet::new();
+        for account in &self.devin.accounts {
+            validate_account_label_for("devin", &account.label)?;
+            if !devin_labels.insert(&account.label) {
+                return Err(AppError::Credentials(format!(
+                    "duplicate devin account label {:?}",
                     account.label
                 )));
             }
@@ -3288,6 +3384,7 @@ mod tests {
             VendorId::OrcaRouter,
             VendorId::ModelStudio,
             VendorId::Devin,
+            VendorId::Droid,
         ] {
             assert!(!c.is_enabled(opt_in), "{opt_in:?}");
         }
@@ -3808,6 +3905,23 @@ enabled = false
     }
 
     #[test]
+    fn droid_is_opt_in_and_takes_no_api_key() {
+        let defaults = DroidConfig::default();
+        assert!(!defaults.enabled);
+        assert!(!defaults.cli_renewal);
+        assert_eq!(defaults.cli_path, None);
+
+        let config = Config::default();
+        assert_eq!(config.api_key_env_for(VendorId::Droid), "");
+        assert_eq!(config.inline_api_key(VendorId::Droid), None);
+
+        let file = write_toml("[droid]\nenabled = true\n");
+        let config = Config::load_from(file.path()).unwrap();
+        assert!(config.is_enabled(VendorId::Droid));
+        assert!(config.enabled_vendors().contains(&VendorId::Droid));
+    }
+
+    #[test]
     fn devin_is_opt_in_and_takes_no_api_key() {
         let defaults = DevinConfig::default();
         assert!(!defaults.enabled);
@@ -3837,6 +3951,106 @@ enabled = false
             "{}",
             path.display()
         );
+    }
+
+    #[test]
+    fn devin_without_accounts_resolves_the_singular_path() {
+        let explicit = DevinConfig {
+            credentials_path: Some(PathBuf::from("/tmp/devin/credentials.toml")),
+            ..DevinConfig::default()
+        };
+        assert_eq!(
+            explicit.resolve_credentials_path(None).unwrap(),
+            PathBuf::from("/tmp/devin/credentials.toml")
+        );
+    }
+
+    #[test]
+    fn devin_named_accounts_resolve_their_own_credentials_file() {
+        let config: Config = toml::from_str(
+            r#"
+            [devin]
+            credentials_path = "/tmp/personal/credentials.toml"
+            [[devin.accounts]]
+            label = "work"
+            credentials_path = "/tmp/work/credentials.toml"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.devin.resolve_credentials_path(Some("work")).unwrap(),
+            PathBuf::from("/tmp/work/credentials.toml")
+        );
+        assert_eq!(
+            config.devin.resolve_credentials_path(None).unwrap(),
+            PathBuf::from("/tmp/personal/credentials.toml")
+        );
+    }
+
+    #[test]
+    fn devin_named_accounts_reject_an_unregistered_label() {
+        let config = DevinConfig {
+            accounts: vec![crate::config::DevinAccount {
+                label: "work".into(),
+                credentials_path: PathBuf::from("/tmp/work/credentials.toml"),
+            }],
+            ..DevinConfig::default()
+        };
+        let err = config
+            .resolve_credentials_path(Some("nope"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nope"), "{err}");
+        assert!(err.contains("[[devin.accounts]]"), "{err}");
+    }
+
+    #[test]
+    fn devin_account_credentials_paths_are_tilde_expanded_on_load() {
+        let f = write_toml(
+            r#"
+            [[devin.accounts]]
+            label = "work"
+            credentials_path = "~/.devin-work/credentials.toml"
+            "#,
+        );
+        let c = Config::load_from(f.path()).unwrap();
+        let home = crate::cache::home_dir().unwrap();
+        assert_eq!(
+            c.devin.accounts[0].credentials_path,
+            home.join(".devin-work/credentials.toml")
+        );
+    }
+
+    #[test]
+    fn devin_rejects_duplicate_account_labels() {
+        let f = write_toml(
+            r#"
+            [[devin.accounts]]
+            label = "work"
+            credentials_path = "/tmp/work1/credentials.toml"
+            [[devin.accounts]]
+            label = "work"
+            credentials_path = "/tmp/work2/credentials.toml"
+            "#,
+        );
+        let err = Config::load_from(f.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate devin account label \"work\""),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn devin_rejects_invalid_account_labels() {
+        let f = write_toml(
+            r#"
+            [[devin.accounts]]
+            label = "../bad"
+            credentials_path = "/tmp/bad/credentials.toml"
+            "#,
+        );
+        assert!(Config::load_from(f.path()).is_err());
     }
 
     #[test]
@@ -5325,6 +5539,29 @@ api_key = "synthetic-account"
     }
 
     #[test]
+    fn opencode_go_and_droid_paths_are_tilde_expanded() {
+        let file = write_toml(
+            r#"
+            [opencode-go]
+            auth_paths = ["~/.local/share/opencode/opencode.db", "/etc/opencode/auth.json"]
+
+            [droid]
+            cli_path = "~/.local/bin/droid"
+            "#,
+        );
+        let config = Config::load_from(file.path()).unwrap();
+        let home = crate::cache::home_dir().unwrap();
+        assert_eq!(
+            config.opencode_go.auth_paths,
+            Some(vec![
+                home.join(".local/share/opencode/opencode.db"),
+                PathBuf::from("/etc/opencode/auth.json"),
+            ])
+        );
+        assert_eq!(config.droid.cli_path, Some(home.join(".local/bin/droid")));
+    }
+
+    #[test]
     fn kiro_db_path_is_tilde_expanded() {
         let f = write_toml(
             r#"
@@ -6329,6 +6566,14 @@ enabled = true
     }
 
     #[test]
+    fn set_value_updates_fields_in_a_toml_inline_table() {
+        let mut doc: toml_edit::DocumentMut =
+            "tray = { shortcut = \"Ctrl+U\" } # mine\n".parse().unwrap();
+        set_value(&mut doc, "tray", "shortcut", Some("Alt+U".into())).unwrap();
+        assert_eq!(doc.to_string(), "tray = { shortcut = \"Alt+U\" } # mine\n");
+    }
+
+    #[test]
     fn enable_vendors_in_creates_a_missing_config() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("sub").join("config.toml");
@@ -6430,6 +6675,20 @@ api_key = \"k\"
 
         assert_eq!(written, vec![VendorId::Grok]);
         assert!(Config::load_from(&path).unwrap().is_enabled(VendorId::Grok));
+    }
+
+    #[test]
+    fn enable_vendors_in_enables_a_toml_inline_table() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "grok = { api_key = \"k\" }\n").unwrap();
+
+        let written = enable_vendors_in(&path, &[VendorId::Grok]).unwrap();
+
+        assert_eq!(written, vec![VendorId::Grok]);
+        assert!(Config::load_from(&path).unwrap().is_enabled(VendorId::Grok));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("grok = {"));
     }
 
     #[test]

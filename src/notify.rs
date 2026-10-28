@@ -1351,6 +1351,8 @@ mod tests {
                         expires_at: Some(at(25, 0, 0)),
                     }],
                 },
+                cloud_credits: None,
+                usage_credits: None,
             }),
             stale: false,
             last_error: None,
@@ -1435,6 +1437,8 @@ mod tests {
                 period: SuperGrokPeriod::Weekly,
                 reset_at: Some(at(26, 0, 0)),
                 prepaid_balance: None,
+                on_demand_used_cents: None,
+                on_demand_cap_cents: None,
                 // available == 0: the report would not surface these either.
                 reset_credits: ResetCredits {
                     available: 0,
@@ -1657,6 +1661,9 @@ mod tests {
             headline: MetricHeadline::Percent,
             used_cents: None,
             limit_cents: None,
+            regen: None,
+            percent_precise: None,
+            reading: None,
         };
         let metric = |label: &str, pct| {
             projection(Section::Metric {

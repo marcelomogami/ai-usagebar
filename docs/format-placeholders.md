@@ -15,8 +15,12 @@ Percentages are used allowance; an omitted window expands to an empty string.
 Synthetic (`--vendor synthetic`, short name `syn`) supplies
 `{synthetic_pct}`, `{synthetic_reset}`, `{synthetic_requests}`, and
 `{synthetic_limit}`, plus the generic `{icon}`, `{plan}`, `{vendor_short}`,
-`{session_pct}`, and `{session_reset}`. The percentage is requests divided by
-the documented subscription limit; the reset is the API's `renewsAt` value.
+`{session_pct}`, `{session_reset}`, `{weekly_pct}`, and `{weekly_reset}`. The
+percentage is the regenerating weekly credit window (`planWeeklyLimit` on
+percentage-only plans, `weeklyTokenLimit` on credit-denominated plans); the
+reset counts down to the next regeneration tick. `{synthetic_requests}` and
+`{synthetic_limit}` carry the weekly credits used and budget when the plan
+reports them, and expand to an empty string on percentage-only plans.
 
 ## Cross-provider formats
 
@@ -38,13 +42,15 @@ the documented subscription limit; the reset is the API's `renewsAt` value.
 | Ollama Cloud | `oll` | SuperGrok | `sgk` |
 | Devin | `dvn` | Cline | `cln` |
 | Muse Code | `msc` | Synthetic | `syn` |
+| Droid | `drd` | | |
 
 The same codes ride the `ai-usagebar usage --json` report as each entry's
 `short_name`, so a native frontend can draw a Waybar-style provider tag without
 restating the table. Every account of one provider shares that provider's code.
 
-Use `{session_pct}`, `{session_reset}`, `{weekly_pct}`, and `{weekly_reset}`
-when one format must work across providers. Providers without matching time
+Use `{session_pct}`, `{session_reset}`, `{weekly_pct}`, `{weekly_reset}`, and
+`{icon}` (the provider's bar mark or short name) when one format must work across
+providers. Providers without matching time
 windows return neutral values. Cursor maps Cursor Models to the session slot
 and Other Models to the weekly slot; both reset with the billing cycle. Kiro
 has one pool, so it maps `kiro_pct` to both percentage slots, and Nous Research
@@ -307,7 +313,7 @@ USD; the China service uses CNY.
 ## SuperGrok
 
 `{sgk_plan}`, `{sgk_pct}`, `{sgk_reset}`, `{sgk_period}`, `{sgk_prepaid}`,
-`{sgk_resets_available}`, `{sgk_resets}`
+`{sgk_on_demand}`, `{sgk_resets_available}`, `{sgk_resets}`
 
 - `{sgk_period}` is `Weekly`, `Monthly`, or `Current period`.
 - The default bar format is `{sgk_pct}% · {sgk_reset}`.
@@ -322,15 +328,21 @@ USD; the China service uses CNY.
 - The prepaid line is shown only when the billing document reports credit —
   a `prepaidBalance` of zero draws no row, while `{sgk_prepaid}` still
   publishes the raw figure.
+- `{sgk_on_demand}` is additional usage past the included pool (`onDemandUsed`
+  / `onDemandCap` from the same billing document), as `$used / $cap` when a
+  cap is set. It is `—` when both are absent or zero, and the tooltip, TUI,
+  and `usage --json` omit the row in that case.
 - `{plan}` is the subscription tier when Grok Build supplies one.
 - `{sgk_resets_available}` is the number of banked resets you can redeem by
   hand, and `{sgk_resets}` the compact count (`1 reset available`). These are
   unrelated to `{sgk_reset}`, which is the current period's automatic rollover.
 
 SuperGrok is the subscription path. It is separate from the Grok Management
-API prepaid balance. Billing comes from Grok Build's documented
-`cli-chat-proxy.grok.com` endpoint, with the CLI's `x.ai/billing` ACP extension
-as a fallback for builds where that endpoint is unavailable.
+API prepaid balance. Billing comes from the endpoint the official Grok CLI
+uses for `/usage` (`cli-chat-proxy.grok.com/v1/billing`), with the CLI's
+`x.ai/billing` ACP extension as a fallback for builds where that endpoint is
+unavailable. That route is not published on docs.x.ai. See
+[docs/grok.md](grok.md).
 
 The HTTPS path reads the `key` from the login's `auth.json` and uses it inside
 the outgoing `Authorization` headers of the billing request and, separately,
@@ -485,6 +497,19 @@ values consistently mean more quota used. `{weekly_pct}` and
 `{session_pct}` and its related placeholders remain empty. The optional
 `{devin_overage_balance}` display uses the tested account's six-decimal USD
 interpretation; its currency contract is not verified for all accounts.
+
+## Droid (Factory)
+
+`{droid_headline_pct}` is the busiest active Standard window — the figure the
+`droid` CLI's `/limits` leads with. `{droid_session_*}`, `{droid_weekly_*}` and
+`{droid_monthly_*}` describe the Standard 5-hour, weekly and monthly windows;
+`{droid_core_session_*}`, `{droid_core_weekly_*}` and `{droid_core_monthly_*}`
+the Droid Core bucket. Every family also has `_reset`, `_elapsed`, `_pace` and
+`_pace_indicator` forms. A window the account has not started keeps its
+percentage with an empty reset; an absent one expands to empty strings.
+`{droid_extra_balance}` is `extraUsageBalanceCents` in dollars.
+`{session_pct}`/`{session_reset}`/`{session_elapsed}` and the `weekly_*`
+aliases map to the Standard 5-hour and weekly windows.
 
 ## Ollama Cloud
 

@@ -11,10 +11,12 @@
 // metricDetail) deliberately mirror omarchy/Model.js so the two native panels
 // word the same data the same way.
 //
-// Two QML V4 engine rules apply to this file, asserted by the test:
+// Three QML V4 engine rules apply to this file, asserted by the test:
 //   - no ES2019 optional catch binding (`catch {`), which V4 rejects outright;
 //   - no Unicode property escapes (\p{...}), which V4 evaluates to false
-//     *silently* rather than throwing.
+//     *silently* rather than throwing;
+//   - no object spread ({...obj}), which V4 rejects with "Unexpected token `...`".
+//     Copy properties explicitly instead.
 
 export const DEFAULT_BINARY = 'ai-usagebar';
 export const DEFAULT_TIMEOUT_SECS = 600;
@@ -487,9 +489,7 @@ export function visibleEntry(entry, hiddenByProvider) {
         sections.push(section);
     });
     closeBlock();
-    // QML's V4 engine does not parse object spread (`{...entry}`), even
-    // though Node and qmllint accept it. Keep this explicit so the whole
-    // plasmoid module remains loadable by plasmashell.
+    // QML V4 does not support object spread (...), so copy properties explicitly.
     return {
         id: entry.id,
         label: entry.label,
