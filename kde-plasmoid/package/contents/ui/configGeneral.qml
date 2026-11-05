@@ -42,6 +42,29 @@ KCM.SimpleKCM {
     property var vendorList: []
     property bool probing: true
 
+    // Selected members first (in their configured order), then the rest, so
+    // the arrows move rows visually in either panel mode.
+    readonly property var selectedProviderIds: multiProviderCheck.checked
+        ? Array.from(page.cfg_displayedVendors || [])
+        : Array.from(page.cfg_vendorRing || [])
+    readonly property var vendorChoices: {
+        const list = Array.from(page.vendorList || []);
+        const selected = page.selectedProviderIds;
+        const byId = {};
+        for (const entry of list)
+            byId[entry.id] = entry;
+        const ordered = [];
+        for (const id of selected) {
+            if (byId[id])
+                ordered.push(byId[id]);
+        }
+        for (const entry of list) {
+            if (selected.indexOf(entry.id) === -1)
+                ordered.push(entry);
+        }
+        return ordered;
+    }
+
     Plasma5Support.DataSource {
         id: prober
         engine: "executable"
@@ -73,8 +96,19 @@ KCM.SimpleKCM {
         return Array.from(page.cfg_vendorRing || []).indexOf(id) !== -1;
     }
 
+    // An empty ring means "all of them", so the boxes read as ticked. The
+    // first untick has to write the list out in full — otherwise it would
+    // leave the ring empty, which is still "all of them", and the box would
+    // spring back.
+    function ringOrAll() {
+        const ring = Array.from(page.cfg_vendorRing || []);
+        if (ring.length)
+            return ring;
+        return Array.from(page.vendorList || []).map(entry => entry.id);
+    }
+
     function setRing(id, on) {
-        const next = Array.from(page.cfg_vendorRing || []).filter(v => v !== id);
+        const next = ringOrAll().filter(v => v !== id);
         if (on)
             next.push(id);
         page.cfg_vendorRing = next;
@@ -84,14 +118,41 @@ KCM.SimpleKCM {
     }
 
     function displayedHas(id) {
-        return Array.from(page.cfg_displayedVendors || []).indexOf(id) !== -1;
+        const displayed = Array.from(page.cfg_displayedVendors || []);
+        return displayed.length === 0 || displayed.indexOf(id) !== -1;
+    }
+
+    function displayedOrAll() {
+        const displayed = Array.from(page.cfg_displayedVendors || []);
+        if (displayed.length)
+            return displayed;
+        return Array.from(page.vendorList || []).map(entry => entry.id);
     }
 
     function setDisplayed(id, on) {
-        const next = Array.from(page.cfg_displayedVendors || []).filter(v => v !== id);
+        const next = displayedOrAll().filter(v => v !== id);
         if (on)
             next.push(id);
         page.cfg_displayedVendors = next;
+    }
+
+    function moveRing(id, delta) {
+        page.cfg_vendorRing = Logic.moveRing(page.cfg_vendorRing, id, delta);
+    }
+
+    function moveDisplayed(id, delta) {
+        page.cfg_displayedVendors = Logic.moveRing(page.cfg_displayedVendors, id, delta);
+    }
+
+    function selectionIndex(id) {
+        return page.selectedProviderIds.indexOf(id);
+    }
+
+    function moveSelection(id, delta) {
+        if (multiProviderCheck.checked)
+            page.moveDisplayed(id, delta);
+        else
+            page.moveRing(id, delta);
     }
 
     function hiddenMap() {
@@ -123,7 +184,9 @@ KCM.SimpleKCM {
             Kirigami.FormData.label: i18n("Vendors:")
             text: page.probing
                 ? i18n("Checking which vendors are configured…")
-                : i18n("Tick the ones the scroll gesture cycles through. Status comes from your config.toml.")
+                : (multiProviderCheck.checked
+                    ? i18n("Tick the providers shown together in the panel. Arrows set their order. Status comes from your config.toml.")
+                    : i18n("Tick the ones that appear as tabs (and that scroll cycles). Arrows set the tab order. Status comes from your config.toml."))
             font: Kirigami.Theme.smallFont
             opacity: 0.7
             wrapMode: Text.WordWrap
@@ -132,18 +195,21 @@ KCM.SimpleKCM {
         }
 
         Repeater {
-            model: page.vendorList
+            model: page.vendorChoices
 
             delegate: RowLayout {
                 id: choice
                 required property var modelData
+                readonly property int selectedAt: page.selectionIndex(choice.modelData.id)
+                // An empty selection shows every vendor, so every box is ticked;
+                // the arrows stay inert until there is a real order to move in.
+                readonly property bool selected: choice.selectedAt !== -1
+                    || page.selectedProviderIds.length === 0
                 spacing: Kirigami.Units.smallSpacing
 
                 QQC2.CheckBox {
                     text: choice.modelData.label || choice.modelData.id
-                    checked: multiProviderCheck.checked
-                        ? page.displayedHas(choice.modelData.id)
-                        : page.ringHas(choice.modelData.id)
+                    checked: choice.selected
                     onToggled: {
                         if (multiProviderCheck.checked)
                             page.setDisplayed(choice.modelData.id, checked);
@@ -166,8 +232,49 @@ KCM.SimpleKCM {
                     font: Kirigami.Theme.smallFont
                     elide: Text.ElideRight
                     Layout.fillWidth: true
-                    Layout.maximumWidth: Kirigami.Units.gridUnit * 20
+                    Layout.maximumWidth: Kirigami.Units.gridUnit * 18
                     textFormat: Text.PlainText
+                }
+
+                // Compact flat arrows kept in the layout for every row (opacity 0
+                // when unticked) so active rows don't grow taller than the rest.
+                QQC2.ToolButton {
+                    flat: true
+                    padding: 0
+                    icon.name: "go-up"
+                    icon.width: Kirigami.Units.iconSizes.small
+                    icon.height: Kirigami.Units.iconSizes.small
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                    Layout.alignment: Qt.AlignVCenter
+                    enabled: choice.selectedAt > 0
+                    opacity: choice.selected ? 1 : 0
+                    text: i18n("Move up")
+                    display: QQC2.AbstractButton.IconOnly
+                    QQC2.ToolTip.text: text
+                    QQC2.ToolTip.visible: hovered && choice.selected
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    onClicked: page.moveSelection(choice.modelData.id, -1)
+                }
+
+                QQC2.ToolButton {
+                    flat: true
+                    padding: 0
+                    icon.name: "go-down"
+                    icon.width: Kirigami.Units.iconSizes.small
+                    icon.height: Kirigami.Units.iconSizes.small
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                    Layout.alignment: Qt.AlignVCenter
+                    enabled: choice.selectedAt !== -1
+                        && choice.selectedAt < page.selectedProviderIds.length - 1
+                    opacity: choice.selected ? 1 : 0
+                    text: i18n("Move down")
+                    display: QQC2.AbstractButton.IconOnly
+                    QQC2.ToolTip.text: text
+                    QQC2.ToolTip.visible: hovered && choice.selected
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    onClicked: page.moveSelection(choice.modelData.id, 1)
                 }
             }
         }

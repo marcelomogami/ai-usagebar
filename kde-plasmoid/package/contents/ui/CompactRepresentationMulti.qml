@@ -89,13 +89,10 @@ MouseArea {
                     }
                 }
 
-                Kirigami.Icon {
-                    implicitWidth: 12
-                    implicitHeight: 12
-                    source: provider.modelData.id === "openai"
-                        ? Qt.resolvedUrl("../icons/openai.svg")
-                        : Qt.resolvedUrl("../icons/claude.svg")
-                    isMask: true
+                ProviderMark {
+                    pixelSize: 12
+                    slug: provider.modelData.iconSlug
+                        || Logic.providerIconSlug(provider.modelData.id)
                     color: provider.modelData.status === "error"
                         ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
                 }

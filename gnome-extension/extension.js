@@ -21,6 +21,7 @@ import {barMarkup, colorForDelta, colorForPct, disambiguateTags, field, FIELD, F
     isGrouped, MARKER, markerElapsed, paceGlyph, plainTextFromPango, selectPools,
     splitFormatOutput} from './marker-logic.js';
 import {commandFailure, errorLine, parseReport} from './report-model.js';
+import {terminalCandidates} from './terminal.js';
 
 const ROLE = 'ai-usagebar';
 
@@ -294,7 +295,11 @@ class AiUsageBarIndicator extends PanelMenu.Button {
                     box.add_child(barWidget(row.percent, PANEL_BAR_W, 5,
                         colors[row.severity] || colors.low, row.elapsed));
                 }
-                const reset = row.reset === 'now' ? 'Resets now' : row.reset ? `Resets in ${row.reset}` : '';
+                const reset = row.reset === 'now'
+                    ? 'Resets now'
+                    : row.reset
+                        ? (row.regen ? `Regenerates ${row.regen} in ${row.reset}` : `Resets in ${row.reset}`)
+                        : '';
                 const detail = [reset, row.detail].filter(Boolean).join(' · ');
                 if (detail)
                     box.add_child(wrappedLabel(detail, 'aiub-detail'));
@@ -684,12 +689,8 @@ class AiUsageBarIndicator extends PanelMenu.Button {
     _openTui() {
         const tui = GLib.find_program_in_path('ai-usagebar-tui') ||
             `${GLib.get_home_dir()}/.cargo/bin/ai-usagebar-tui`;
-        const candidates = [
-            ['kgx', '--', tui],
-            ['gnome-terminal', '--', tui],
-            ['xterm', '-e', tui],
-        ];
-        for (const argv of candidates) {
+        const line = `export PATH="$HOME/.local/bin:$PATH" && ${GLib.shell_quote(tui)}`;
+        for (const argv of terminalCandidates(line)) {
             if (!GLib.find_program_in_path(argv[0]))
                 continue;
             try {
@@ -699,7 +700,7 @@ class AiUsageBarIndicator extends PanelMenu.Button {
                 // try the next terminal
             }
         }
-        Main.notify('AI Usage Bar', 'No terminal found (kgx / gnome-terminal / xterm).');
+        Main.notify('AI Usage Bar', 'No terminal found (ptyxis / kgx / gnome-terminal / xterm).');
     }
 
     destroy() {

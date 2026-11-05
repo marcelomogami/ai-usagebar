@@ -27,6 +27,7 @@ pub mod countdown;
 pub mod cursor;
 pub mod custom;
 pub mod deepinfra;
+pub mod deeprelay;
 pub mod deepseek;
 pub mod detect;
 pub mod devin;
@@ -78,3 +79,5 @@ pub mod widget;
 pub mod zai;
 
 pub use error::{AppError, Result};
+
+pub mod recommendation;
